@@ -1,0 +1,10 @@
+(qir "adder_csa_phase"
+  (input %a u8)
+  (input %b u8)
+  (input %c u8)
+  (input %d u8)
+  (let %s1 u8 (add %a %b))
+  (let %s2 u8 (add %s1 %c))
+  (let %sum u8 (add %s2 %d))
+  (output %sum)
+)

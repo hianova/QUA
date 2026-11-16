@@ -1,0 +1,37 @@
+# OS & Editor
+.DS_Store
+*.plist
+.vscode/
+.idea/
+.agents/
+
+# Build & Compiled Artifacts
+build/
+**/build/
+*.o
+*.so
+*.dylib
+*.a
+*.kmx
+
+# Python & Virtualenv
+.venv/
+**/.venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Competition Datasets, Third-Party Clones & Staged Outputs
+kaggle/data/
+kaggle/vendor/
+kaggle/submissions/stage/
+kaggle/submissions/*.zip
+
+# DF-THC Large Scratch Checkpoints, Reference Caches & Compiled Binary
+kaggle/dfthcsos_opt/dft_bootstrap
+kaggle/dfthcsos_opt/*.bin
+kaggle/dfthcsos_opt/*.npz
+kaggle/dfthcsos_opt/best_submission/
+kaggle/dfthcsos_opt/cand_*/
+!kaggle/dfthcsos_opt/words.bin
+!kaggle/dfthcsos_opt/submission.npz

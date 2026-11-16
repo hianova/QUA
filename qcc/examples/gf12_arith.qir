@@ -1,0 +1,8 @@
+(qir "gf12_arith"
+  (input %a u12)
+  (input %b u12)
+  (let %ainv u12 (gf2m_inv %a 12 0x1053))
+  (let %prod u12 (gf2m_mul %ainv %b 12 0x1053))
+  (let %res u12 (gf2m_add %prod %a 12))
+  (output %res)
+)
