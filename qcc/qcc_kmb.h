@@ -143,6 +143,8 @@ typedef struct {
     uint64_t swap;
     uint64_t r_count;
     uint64_t reaction_depth;
+    uint64_t toffoli_depth;
+    uint64_t circuit_depth;
 } qcc_kmb_stats_t;
 
 typedef struct {
@@ -817,15 +819,31 @@ static inline bool qcc_kmb_recompute_stats(const qcc_kmb_circuit_t *c, qcc_kmb_s
     out->num_ops    = c->num_ops;
 
     uint64_t *bit_layer = nb ? (uint64_t *)calloc(nb, sizeof(uint64_t)) : NULL;
+    uint64_t *q_gd = nq ? (uint64_t *)calloc(nq, sizeof(uint64_t)) : NULL;
+    uint64_t *q_td = nq ? (uint64_t *)calloc(nq, sizeof(uint64_t)) : NULL;
+    uint64_t *b_gd = nb ? (uint64_t *)calloc(nb, sizeof(uint64_t)) : NULL;
+    uint64_t *b_td = nb ? (uint64_t *)calloc(nb, sizeof(uint64_t)) : NULL;
     size_t cond_cap = 64u, cond_len = 0u;
-    uint64_t *cond_stack = (uint64_t *)calloc(cond_cap, sizeof(uint64_t));
-    if ((nb && !bit_layer) || !cond_stack) {
+    uint64_t *cond_stack    = (uint64_t *)calloc(cond_cap, sizeof(uint64_t));
+    uint64_t *cond_gd_stack = (uint64_t *)calloc(cond_cap, sizeof(uint64_t));
+    uint64_t *cond_td_stack = (uint64_t *)calloc(cond_cap, sizeof(uint64_t));
+    if ((nb && (!bit_layer || !b_gd || !b_td)) ||
+        (nq && (!q_gd || !q_td)) ||
+        !cond_stack || !cond_gd_stack || !cond_td_stack) {
         free(bit_layer);
+        free(q_gd);
+        free(q_td);
+        free(b_gd);
+        free(b_td);
         free(cond_stack);
+        free(cond_gd_stack);
+        free(cond_td_stack);
         return false;
     }
 
     uint64_t cur_cond_depth = 0u;
+    uint64_t cur_cond_gd    = 0u;
+    uint64_t cur_cond_td    = 0u;
     qcc_kmb_cursor_t cur;
     qcc_kmb_cursor_init(&cur);
     qcc_kmb_op_view_t v;
@@ -834,18 +852,29 @@ static inline bool qcc_kmb_recompute_stats(const qcc_kmb_circuit_t *c, qcc_kmb_s
         if (v.op == QCC_OP_PUSH_CONDITION) {
             if (cond_len >= cond_cap) {
                 cond_cap *= 2u;
-                cond_stack = (uint64_t *)realloc(cond_stack, cond_cap * sizeof(uint64_t));
-                if (!cond_stack) abort();
+                cond_stack    = (uint64_t *)realloc(cond_stack,    cond_cap * sizeof(uint64_t));
+                cond_gd_stack = (uint64_t *)realloc(cond_gd_stack, cond_cap * sizeof(uint64_t));
+                cond_td_stack = (uint64_t *)realloc(cond_td_stack, cond_cap * sizeof(uint64_t));
+                if (!cond_stack || !cond_gd_stack || !cond_td_stack) abort();
             }
-            cond_stack[cond_len++] = bit_layer[v.cond];
+            cond_stack[cond_len]    = bit_layer[v.cond];
+            cond_gd_stack[cond_len] = b_gd[v.cond];
+            cond_td_stack[cond_len] = b_td[v.cond];
+            cond_len++;
             if (bit_layer[v.cond] > cur_cond_depth) cur_cond_depth = bit_layer[v.cond];
+            if (b_gd[v.cond] > cur_cond_gd) cur_cond_gd = b_gd[v.cond];
+            if (b_td[v.cond] > cur_cond_td) cur_cond_td = b_td[v.cond];
             continue;
         }
         if (v.op == QCC_OP_POP_CONDITION) {
             if (cond_len > 0u) cond_len--;
             cur_cond_depth = 0u;
+            cur_cond_gd    = 0u;
+            cur_cond_td    = 0u;
             for (size_t k = 0u; k < cond_len; ++k) {
                 if (cond_stack[k] > cur_cond_depth) cur_cond_depth = cond_stack[k];
+                if (cond_gd_stack[k] > cur_cond_gd) cur_cond_gd    = cond_gd_stack[k];
+                if (cond_td_stack[k] > cur_cond_td) cur_cond_td    = cond_td_stack[k];
             }
             continue;
         }
@@ -853,11 +882,57 @@ static inline bool qcc_kmb_recompute_stats(const qcc_kmb_circuit_t *c, qcc_kmb_s
         uint64_t d = cur_cond_depth;
         if (v.has_cond && bit_layer[v.cond] > d) d = bit_layer[v.cond];
 
+        bool is_debug_or_tag = (base == QCC_OP_INFO_TAG || base == QCC_OP_DEBUG_PRINT_EMPTY ||
+                                base == QCC_OP_DEBUG_PRINT_C || base == QCC_OP_DEBUG_PRINT_Q);
+        uint64_t in_gd = cur_cond_gd;
+        uint64_t in_td = cur_cond_td;
+        if (v.has_cond && v.cond < nb) {
+            if (b_gd[v.cond] > in_gd) in_gd = b_gd[v.cond];
+            if (b_td[v.cond] > in_td) in_td = b_td[v.cond];
+        }
+        for (uint8_t k = 0u; k < v.n_q; ++k) {
+            if (v.q[k] < nq) {
+                if (q_gd[v.q[k]] > in_gd) in_gd = q_gd[v.q[k]];
+                if (q_td[v.q[k]] > in_td) in_td = q_td[v.q[k]];
+            }
+        }
+        if (base == QCC_OP_BIT_INVERT && v.has_b && v.b < nb) {
+            if (b_gd[v.b] > in_gd) in_gd = b_gd[v.b];
+            if (b_td[v.b] > in_td) in_td = b_td[v.b];
+        }
+
         if (base == QCC_OP_BIT_STORE0 || base == QCC_OP_BIT_STORE1) {
             bit_layer[v.b] = d;
+            if (v.has_b && v.b < nb) {
+                b_gd[v.b] = in_gd;
+                b_td[v.b] = in_td;
+            }
         } else if (base == QCC_OP_BIT_INVERT) {
             if (d > bit_layer[v.b]) bit_layer[v.b] = d;
-        } else if (base == QCC_OP_HMR) {
+            if (v.has_b && v.b < nb) {
+                b_gd[v.b] = in_gd;
+                b_td[v.b] = in_td;
+            }
+        } else if (!is_debug_or_tag && v.n_q > 0u) {
+            bool is_noncliff = (base == QCC_OP_CCX || base == QCC_OP_CCZ || base == QCC_OP_CSWAP) ||
+                               (base == QCC_OP_Z_POW && qcc_u128_clifford_level(qcc_u128_from_angle(v.angle)) >= 3u);
+            uint64_t ngd = in_gd + 1u;
+            uint64_t ntd = in_td + (is_noncliff ? 1u : 0u);
+            for (uint8_t k = 0u; k < v.n_q; ++k) {
+                if (v.q[k] < nq) {
+                    q_gd[v.q[k]] = ngd;
+                    q_td[v.q[k]] = ntd;
+                }
+            }
+            if (base == QCC_OP_HMR && v.has_b && v.b < nb) {
+                b_gd[v.b] = ngd;
+                b_td[v.b] = ntd;
+            }
+            if (ngd > out->circuit_depth) out->circuit_depth = ngd;
+            if (ntd > out->toffoli_depth) out->toffoli_depth = ntd;
+        }
+
+        if (base == QCC_OP_HMR) {
             out->hmr++;
             uint64_t next_d = d + 1u;
             bit_layer[v.b] = next_d;
@@ -897,7 +972,13 @@ static inline bool qcc_kmb_recompute_stats(const qcc_kmb_circuit_t *c, qcc_kmb_s
                cur.iang == c->num_angles &&
                cur.itag == c->num_info_tags);
     free(bit_layer);
+    free(q_gd);
+    free(q_td);
+    free(b_gd);
+    free(b_td);
     free(cond_stack);
+    free(cond_gd_stack);
+    free(cond_td_stack);
     return ok;
 }
 

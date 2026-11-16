@@ -14,6 +14,7 @@ extern "C" {
 
 #define QIR_EGRAPH_MAX_CLASSES 4096u
 #define QIR_GF12_RANK          42u
+#define QIR_GF256_RANK         27u
 #define QIR_GF64_RANK          15u
 
 typedef enum {
@@ -24,8 +25,9 @@ typedef enum {
     QIR_VAR_PHASE_CSA_DIRECT,      /* R4: Elide ADD/SUB tree feeding linear modular PHASE_POLY */
     QIR_VAR_LUT_COL_SPLIT,         /* R5: Multi-column streaming bit-sliced LUT */
     QIR_VAR_GF2M_CHUDNOVSKY_R42,   /* R6: Rank-42 P^1(GF(8)) GF(2^12) bilinear mul */
+    QIR_VAR_GF2M_RANK27,           /* R6: Rank-27 tower Karatsuba GF(2^8) bilinear mul */
     QIR_VAR_GF2M_RANK15,           /* R6: Rank-15 P^1(GF(4)) GF(64) bilinear mul */
-    QIR_VAR_GF2M_TOWER_INV,        /* R6: Composite tower GF(((2^3)^2)^2) inversion */
+    QIR_VAR_GF2M_TOWER_INV,        /* R6: Composite algebraic tower inversion */
     QIR_VAR_LIN_GAUGE_TSP,         /* R7: Rank-compressed / Hamming-TSP basis-gauged LUT */
     QIR_VAR_TRIVIAL_ELIDE,         /* Algebraic zero/const/dead elimination */
     QIR_VAR_QROAM_VSLOT0,          /* R8: Virtual-Slot-0 Differential Select-Swap QROAM */
@@ -62,6 +64,13 @@ typedef struct {
     uint8_t  w_mask[QIR_GF64_RANK];
     uint32_t order[QIR_GF64_RANK];
 } qir_gf64_rank15_t;
+
+typedef struct {
+    uint8_t  l_mask[QIR_GF256_RANK];
+    uint8_t  r_mask[QIR_GF256_RANK];
+    uint8_t  w_mask[QIR_GF256_RANK];
+    uint32_t order[QIR_GF256_RANK];
+} qir_gf256_rank27_t;
 
 typedef struct {
     uint16_t     rank_bits;   /* Compressed column rank r <= val_bits */
@@ -471,6 +480,156 @@ static inline bool qir_build_gf64_rank15(uint32_t irred_poly, qir_gf64_rank15_t 
             }
             if (got != (uint8_t)qir__gf2m_mul_u32(a, b, 6u, irred_poly)) return false;
         }
+    }
+    return true;
+}
+
+static inline uint8_t qir__gf16_tower_mul(uint8_t a, uint8_t b) {
+    uint8_t a0 = (uint8_t)(a & 3u), a1 = (uint8_t)((a >> 2u) & 3u);
+    uint8_t b0 = (uint8_t)(b & 3u), b1 = (uint8_t)((b >> 2u) & 3u);
+    uint8_t p0 = qir__gf4_mul(a0, b0);
+    uint8_t p1 = qir__gf4_mul(a1, b1);
+    uint8_t p2 = qir__gf4_mul((uint8_t)(a0 ^ a1), (uint8_t)(b0 ^ b1));
+    uint8_t c0 = (uint8_t)(p0 ^ qir__gf4_mul(p1, 2u));
+    uint8_t c1 = (uint8_t)(p0 ^ p2);
+    return (uint8_t)(c0 | (c1 << 2u));
+}
+
+/* Build GF(((2^2)^2)^2) Rank-27 bilinear multiplier plan for arbitrary deg-8 irred_poly */
+static inline bool qir_build_gf256_rank27(uint32_t irred_poly, qir_gf256_rank27_t *out) {
+    memset(out, 0, sizeof(*out));
+    uint8_t u_elem = 0u, v_elem = 0u;
+    for (uint32_t cand = 2u; cand < 256u; ++cand) {
+        uint32_t c2 = qir__gf2m_mul_u32(cand, cand, 8u, irred_poly);
+        if ((c2 ^ cand ^ 1u) == 0u) { u_elem = (uint8_t)cand; break; }
+    }
+    if (u_elem == 0u) return false;
+    for (uint32_t cand = 2u; cand < 256u; ++cand) {
+        uint32_t c2 = qir__gf2m_mul_u32(cand, cand, 8u, irred_poly);
+        if ((c2 ^ cand ^ (uint32_t)u_elem) == 0u) { v_elem = (uint8_t)cand; break; }
+    }
+    if (v_elem == 0u) return false;
+
+    uint8_t b16[4] = {
+        1u, u_elem, v_elem,
+        (uint8_t)qir__gf2m_mul_u32(u_elem, v_elem, 8u, irred_poly)
+    };
+    uint8_t w_elem = 0u, nu4 = 0u;
+    for (uint32_t g = 2u; g < 256u && !w_elem; ++g) {
+        uint32_t g2  = qir__gf2m_mul_u32(g, g, 8u, irred_poly);
+        uint32_t sum = g2 ^ g;
+        for (uint8_t c16 = 1u; c16 < 16u; ++c16) {
+            uint32_t val = 0u;
+            for (uint32_t b = 0u; b < 4u; ++b) if ((c16 >> b) & 1u) val ^= b16[b];
+            if (val == sum) {
+                bool in_sub = false;
+                for (uint8_t d16 = 0u; d16 < 16u; ++d16) {
+                    uint32_t v2 = 0u;
+                    for (uint32_t b = 0u; b < 4u; ++b) if ((d16 >> b) & 1u) v2 ^= b16[b];
+                    if (v2 == g) { in_sub = true; break; }
+                }
+                if (!in_sub) { w_elem = (uint8_t)g; nu4 = c16; break; }
+            }
+        }
+    }
+    if (w_elem == 0u) return false;
+
+    uint8_t basis8[8], mat[8], inv[8];
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        basis8[i]      = b16[i];
+        basis8[4u + i] = (uint8_t)qir__gf2m_mul_u32(b16[i], w_elem, 8u, irred_poly);
+    }
+    for (uint32_t r = 0u; r < 8u; ++r) {
+        uint8_t row = 0u;
+        for (uint32_t c = 0u; c < 8u; ++c) if ((basis8[c] >> r) & 1u) row |= (uint8_t)(1u << c);
+        mat[r] = row;
+        inv[r] = (uint8_t)(1u << r);
+    }
+    for (uint32_t col = 0u; col < 8u; ++col) {
+        uint32_t piv = col;
+        while (piv < 8u && (((mat[piv] >> col) & 1u) == 0u)) ++piv;
+        if (piv == 8u) return false;
+        if (piv != col) {
+            uint8_t tm = mat[col]; mat[col] = mat[piv]; mat[piv] = tm;
+            uint8_t ti = inv[col]; inv[col] = inv[piv]; inv[piv] = ti;
+        }
+        for (uint32_t r = 0u; r < 8u; ++r) {
+            if (r != col && ((mat[r] >> col) & 1u)) {
+                mat[r] ^= mat[col];
+                inv[r] ^= inv[col];
+            }
+        }
+    }
+
+    static const uint8_t k3_u[3]   = {0x1u, 0x2u, 0x3u};
+    static const uint8_t k3_v[3]   = {0x1u, 0x2u, 0x3u};
+    static const uint8_t k3_out[3] = {0x3u, 0x1u, 0x2u};
+    uint8_t lm16[9], rm16[9], wm16[9];
+    for (uint32_t k = 0u; k < 3u; ++k) {
+        lm16[k]      = k3_u[k];
+        rm16[k]      = k3_v[k];
+        wm16[k]      = (uint8_t)(k3_out[k] | (k3_out[k] << 2u));
+
+        lm16[3u + k] = (uint8_t)(k3_u[k] << 2u);
+        rm16[3u + k] = (uint8_t)(k3_v[k] << 2u);
+        wm16[3u + k] = qir__gf4_mul(k3_out[k], 2u);
+
+        lm16[6u + k] = (uint8_t)(k3_u[k] | (k3_u[k] << 2u));
+        rm16[6u + k] = (uint8_t)(k3_v[k] | (k3_v[k] << 2u));
+        wm16[6u + k] = (uint8_t)(k3_out[k] << 2u);
+    }
+
+    for (uint32_t k = 0u; k < 9u; ++k) {
+        uint8_t lm_t[3] = { lm16[k], (uint8_t)(lm16[k] << 4u), (uint8_t)(lm16[k] | (lm16[k] << 4u)) };
+        uint8_t rm_t[3] = { rm16[k], (uint8_t)(rm16[k] << 4u), (uint8_t)(rm16[k] | (rm16[k] << 4u)) };
+        uint8_t wm_t[3] = {
+            (uint8_t)(wm16[k] | (wm16[k] << 4u)),
+            qir__gf16_tower_mul(wm16[k], nu4),
+            (uint8_t)(wm16[k] << 4u)
+        };
+        for (uint32_t blk = 0u; blk < 3u; ++blk) {
+            uint32_t p = blk * 9u + k;
+            uint8_t std_lm = 0u, std_rm = 0u, std_wm = 0u;
+            for (uint32_t t = 0u; t < 8u; ++t) {
+                if ((lm_t[blk] >> t) & 1u) std_lm ^= inv[t];
+                if ((rm_t[blk] >> t) & 1u) std_rm ^= inv[t];
+                if ((wm_t[blk] >> t) & 1u) std_wm ^= basis8[t];
+            }
+            out->l_mask[p] = std_lm;
+            out->r_mask[p] = std_rm;
+            out->w_mask[p] = std_wm;
+            out->order[p]  = p;
+        }
+    }
+
+    for (uint32_t i = 0u; i < 8u; ++i) {
+        for (uint32_t j = 0u; j < 8u; ++j) {
+            uint8_t a = (uint8_t)(1u << i), b = (uint8_t)(1u << j), got = 0u;
+            for (uint32_t p = 0u; p < QIR_GF256_RANK; ++p) {
+                uint32_t la = (uint32_t)__builtin_parity((unsigned)(out->l_mask[p] & a));
+                uint32_t rb = (uint32_t)__builtin_parity((unsigned)(out->r_mask[p] & b));
+                if (la & rb) got ^= out->w_mask[p];
+            }
+            if (got != (uint8_t)qir__gf2m_mul_u32(a, b, 8u, irred_poly)) return false;
+        }
+    }
+
+    bool used[QIR_GF256_RANK];
+    memset(used, 0, sizeof(used));
+    uint32_t cur = 0u;
+    for (uint32_t step = 0u; step < QIR_GF256_RANK; ++step) {
+        uint32_t best_p = 0u, best_cost = 9999u;
+        for (uint32_t p = 0u; p < QIR_GF256_RANK; ++p) {
+            if (used[p]) continue;
+            uint32_t c = (step == 0u)
+                ? (uint32_t)(__builtin_popcount(out->l_mask[p]) + __builtin_popcount(out->r_mask[p]))
+                : (qir__hamming_dist_u32(out->l_mask[cur], out->l_mask[p]) +
+                   qir__hamming_dist_u32(out->r_mask[cur], out->r_mask[p]));
+            if (c < best_cost) { best_cost = c; best_p = p; }
+        }
+        used[best_p] = true;
+        out->order[step] = best_p;
+        cur = best_p;
     }
     return true;
 }
@@ -1015,13 +1174,23 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
             r6_hmr.aux_param = 1u;
             qir__egraph_add_enode(eg, &r6_hmr);
             eg->rules_fired[6]++;
+        } else if (op->kind == QIR_OP_GF2M_MUL && op->u.gf2m.m == 8u) {
+            qir_enode_t r6 = node;
+            r6.variant  = QIR_VAR_GF2M_RANK27;
+            r6.rule_tag = 6u;
+            qir__egraph_add_enode(eg, &r6);
+            qir_enode_t r6_hmr = r6;
+            r6_hmr.variant   = QIR_VAR_HMR_PARITY_LUT; /* Denotes 0-CCX HMR uncompute variant for GF256 bilinear */
+            r6_hmr.aux_param = 1u;
+            qir__egraph_add_enode(eg, &r6_hmr);
+            eg->rules_fired[6]++;
         } else if (op->kind == QIR_OP_GF2M_MUL && op->u.gf2m.m == 6u) {
             qir_enode_t r6 = node;
             r6.variant  = QIR_VAR_GF2M_RANK15;
             r6.rule_tag = 6u;
             qir__egraph_add_enode(eg, &r6);
             eg->rules_fired[6]++;
-        } else if (op->kind == QIR_OP_GF2M_INV && (op->u.gf2m.m == 12u || op->u.gf2m.m == 6u)) {
+        } else if (op->kind == QIR_OP_GF2M_INV && (op->u.gf2m.m == 12u || op->u.gf2m.m == 8u || op->u.gf2m.m == 6u)) {
             qir_enode_t r6 = node;
             r6.variant  = QIR_VAR_GF2M_TOWER_INV;
             r6.rule_tag = 6u;
@@ -1197,7 +1366,8 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
                     }
                 } else if (dop->kind == QIR_OP_GF2M_MUL) {
                     qir_variant_kind_t sv = (dop->u.gf2m.m == 12u) ? QIR_VAR_GF2M_CHUDNOVSKY_R42
-                                          : ((dop->u.gf2m.m == 6u) ? QIR_VAR_GF2M_RANK15 : QIR_VAR_STD);
+                                          : ((dop->u.gf2m.m == 8u) ? QIR_VAR_GF2M_RANK27
+                                          : ((dop->u.gf2m.m == 6u) ? QIR_VAR_GF2M_RANK15 : QIR_VAR_STD));
                     qir_enode_t r10c = node;
                     r10c.variant       = QIR_VAR_XOR_ACCUM;
                     r10c.rule_tag      = 12u;

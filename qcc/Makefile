@@ -33,6 +33,8 @@ examples: $(TARGET)
 	./$(TARGET) verify $(BUILD)/adder_csa_phase.kmb --ref examples/adder_csa_phase.qir
 	./$(TARGET) verify $(BUILD)/gf12_arith.kmb --ref examples/gf12_arith.qir
 	./$(TARGET) verify $(BUILD)/invsqrt_phase_oracle.kmb --ref examples/invsqrt_phase_oracle.qir
+	./$(TARGET) verify $(BUILD)/invsqrt_poly.kmb
+	./$(TARGET) verify $(BUILD)/wide_lut_cap.kmb
 
 clean:
 	rm -rf $(BUILD)

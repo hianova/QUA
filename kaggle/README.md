@@ -46,7 +46,7 @@
 cd /Users/kuangtalin/Documents/QUA/kaggle
 make all                  # 編譯 qua_synth、dft_bootstrap 並執行 test
 make test                 # 執行 qua_synth、8 項 Kickmix Fuzz 驗證與 Kickmix pytest
-make verify-qcc           # 聯動驗證 ../qcc T1..T20、5 個範例與 selftest 雙種子檢查
+make verify-qcc           # 聯動驗證 ../qcc T1..T21、5 個範例與 selftest 雙種子檢查
 make stage-init           # 從 sample_submission 初始化暫存目錄
 make stage-sync           # 同步 build/invsqrt.kmb 與 dfthcsos 到 stage（缺 dqi 時沿用基準）
 make score                # 執行官方 Verifier 快速模式並投影分數

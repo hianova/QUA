@@ -372,10 +372,12 @@ static inline bool qir_verify_kmb_vs_qir(
     return rep.passed;
 }
 
-static inline bool qir_verify_kmb_vs_kmb(
+static inline bool qir_verify_kmb_vs_kmb_mask(
     const qcc_kmb_circuit_t *cand,
     const qcc_kmb_circuit_t *ref,
     uint32_t num_io_qubits,
+    const uint8_t *init_mask_opt,
+    const uint8_t *cmp_mask_opt,
     uint32_t num_batches,
     uint64_t seed,
     qir_verify_report_t *out_rep
@@ -400,7 +402,9 @@ static inline bool qir_verify_kmb_vs_kmb(
 
     for (uint32_t b = 0u; b < num_batches; ++b) {
         memset(init_q, 0, nq * sizeof(uint64_t));
-        for (uint32_t q = 0u; q < io; ++q) {
+        for (uint32_t q = 0u; q < nq; ++q) {
+            bool do_init = init_mask_opt ? (init_mask_opt[q] != 0u) : (q < io);
+            if (!do_init) continue;
             init_q[q] = (b == 0u) ? ((q & 1u) ? UINT64_C(0xAAAAAAAAAAAAAAAA) : UINT64_C(0x5555555555555555)) : qcc_splitmix64(&rng);
         }
         flow_u128 pc1[64], pc2[64], pr1[64];
@@ -420,7 +424,10 @@ static inline bool qir_verify_kmb_vs_kmb(
             if (!has_off) { global_off = d; has_off = true; }
             else if (d != global_off) rep.phase_mismatches++;
 
-            for (uint32_t q = 0u; q < io; ++q) {
+            for (uint32_t q = 0u; q < nq; ++q) {
+                bool do_cmp = cmp_mask_opt ? (cmp_mask_opt[q] != 0u)
+                                           : (init_mask_opt ? (init_mask_opt[q] != 0u) : (q < io));
+                if (!do_cmp) continue;
                 uint64_t b1 = (qc1[q] >> l) & 1u;
                 uint64_t b2 = (qc2[q] >> l) & 1u;
                 uint64_t br = (qr1[q] >> l) & 1u;
@@ -437,6 +444,17 @@ static inline bool qir_verify_kmb_vs_kmb(
     if (out_rep) *out_rep = rep;
     free(init_q); free(qc1); free(qc2); free(qr1);
     return rep.passed;
+}
+
+static inline bool qir_verify_kmb_vs_kmb(
+    const qcc_kmb_circuit_t *cand,
+    const qcc_kmb_circuit_t *ref,
+    uint32_t num_io_qubits,
+    uint32_t num_batches,
+    uint64_t seed,
+    qir_verify_report_t *out_rep
+) {
+    return qir_verify_kmb_vs_kmb_mask(cand, ref, num_io_qubits, NULL, NULL, num_batches, seed, out_rep);
 }
 
 #ifdef __cplusplus

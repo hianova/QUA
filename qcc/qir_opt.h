@@ -210,7 +210,8 @@ static inline void qir__query_step_temp(
                                        out_temp_anc, out_cbits);
                 } else if (dop->kind == QIR_OP_GF2M_MUL) {
                     *out_temp_anc = 1u;
-                    *out_cbits    = (dop->u.gf2m.m == 12u || dop->u.gf2m.m == 6u) ? 4u : (uint32_t)dop->u.gf2m.m * dop->u.gf2m.m;
+                    *out_cbits    = (dop->u.gf2m.m == 12u || dop->u.gf2m.m == 8u || dop->u.gf2m.m == 6u)
+                        ? 4u : (uint32_t)dop->u.gf2m.m * dop->u.gf2m.m;
                 }
             }
             break;
@@ -219,14 +220,19 @@ static inline void qir__query_step_temp(
                 break;
             }
             *out_temp_anc = 1u;
-            *out_cbits    = (uncomp && (op->u.gf2m.m == 12u || op->u.gf2m.m == 6u))
+            *out_cbits    = (uncomp && (op->u.gf2m.m == 12u || op->u.gf2m.m == 8u || op->u.gf2m.m == 6u))
                 ? (op->u.gf2m.m + 1u)
-                : ((op->u.gf2m.m == 12u || op->u.gf2m.m == 6u) ? 4u : (uint32_t)op->u.gf2m.m * op->u.gf2m.m);
+                : ((op->u.gf2m.m == 12u || op->u.gf2m.m == 8u || op->u.gf2m.m == 6u) ? 4u : (uint32_t)op->u.gf2m.m * op->u.gf2m.m);
             break;
         case QIR_OP_GF2M_INV:
             if (op->u.gf2m.m == 12u) {
                 *out_temp_anc = (op->num_ins >= 2u) ? 22u : 19u;
                 *out_cbits    = 48u;
+            } else if (op->u.gf2m.m == 8u && st->variant == QIR_VAR_GF2M_TOWER_INV &&
+                       plan_plans_only && plan_plans_only->has_gf256_tower &&
+                       plan_plans_only->gf256_tower_poly == op->u.gf2m.irred_poly) {
+                *out_temp_anc = (op->num_ins >= 2u) ? 13u : 11u;
+                *out_cbits    = 32u;
             } else if (op->num_ins >= 2u) {
                 *out_temp_anc = 2u * op->u.gf2m.m;
                 *out_cbits    = (UINT32_C(1) << op->u.gf2m.m) * 2u;
@@ -307,8 +313,9 @@ static inline void qir__query_step_temp(
     }
 }
 
-/* Dynamic Qubit Pool Bitset (up to 8192 qubits cleanly) */
-#define QIR_POOL_WORDS 128u
+/* Dynamic Qubit Pool Bitset (up to 65536 qubits cleanly) */
+#define QIR_POOL_WORDS 1024u
+#define QIR_POOL_MAX_Q (QIR_POOL_WORDS * 64u)
 typedef struct {
     uint64_t dirty[QIR_POOL_WORDS];     /* Bit q=1 => currently allocated live / non-zero */
     uint64_t dirty_perm[QIR_POOL_WORDS];/* Bit q=1 => permanently dirty tail (never borrowable) */
@@ -325,11 +332,11 @@ static inline uint32_t qir__pool_alloc_clean(qir__qpool_t *p, uint32_t *out_peak
             return q;
         }
     }
-    return 8191u;
+    return QIR_POOL_MAX_Q - 1u;
 }
 
 static inline void qir__pool_free_clean(qir__qpool_t *p, uint32_t q) {
-    if (q < 8192u) p->dirty[q >> 6u] &= ~(UINT64_C(1) << (q & 63u));
+    if (q < QIR_POOL_MAX_Q) p->dirty[q >> 6u] &= ~(UINT64_C(1) << (q & 63u));
 }
 
 static inline uint16_t qir__collect_op_inputs(
@@ -397,7 +404,7 @@ static inline uint16_t qir__collect_op_inputs(
 }
 
 static inline bool qir__pool_is_busy(const qir__qpool_t *p, uint32_t q) {
-    if (q >= 8192u) return true;
+    if (q >= QIR_POOL_MAX_Q) return true;
     return (((p->dirty[q >> 6u] | p->dirty_perm[q >> 6u]) >> (q & 63u)) & 1u) != 0u;
 }
 
@@ -692,11 +699,21 @@ static inline bool qir_regalloc_pack(
         if ((op->kind == QIR_OP_GF2M_MUL || (op->kind == QIR_OP_PHASE_DOT && op->num_ins >= 3u)) &&
             op->u.gf2m.m == 12u && !out_plan->has_gf12_r42) {
             out_plan->has_gf12_r42 = qir_build_gf12_rank42(op->u.gf2m.irred_poly, &out_plan->gf12_r42);
+            if (out_plan->has_gf12_r42) out_plan->gf12_r42_poly = op->u.gf2m.irred_poly;
+        } else if ((op->kind == QIR_OP_GF2M_MUL || (op->kind == QIR_OP_PHASE_DOT && op->num_ins >= 3u)) &&
+                   op->u.gf2m.m == 8u && !out_plan->has_gf256_r27) {
+            out_plan->has_gf256_r27 = qir_build_gf256_rank27(op->u.gf2m.irred_poly, &out_plan->gf256_r27);
+            if (out_plan->has_gf256_r27) out_plan->gf256_r27_poly = op->u.gf2m.irred_poly;
         } else if ((op->kind == QIR_OP_GF2M_MUL || (op->kind == QIR_OP_PHASE_DOT && op->num_ins >= 3u)) &&
                    op->u.gf2m.m == 6u && !out_plan->has_gf64_r15) {
             out_plan->has_gf64_r15 = qir_build_gf64_rank15(op->u.gf2m.irred_poly, &out_plan->gf64_r15);
+            if (out_plan->has_gf64_r15) out_plan->gf64_r15_poly = op->u.gf2m.irred_poly;
         } else if (op->kind == QIR_OP_GF2M_INV && op->u.gf2m.m == 12u && !out_plan->has_gf12_tower) {
             out_plan->has_gf12_tower = qir_build_gf12_tower_inv(op->u.gf2m.irred_poly, &out_plan->gf12_tower);
+            if (out_plan->has_gf12_tower) out_plan->gf12_tower_poly = op->u.gf2m.irred_poly;
+        } else if (op->kind == QIR_OP_GF2M_INV && op->u.gf2m.m == 8u && !out_plan->has_gf256_tower) {
+            out_plan->has_gf256_tower = qir_build_gf256_tower_inv(op->u.gf2m.irred_poly, &out_plan->gf256_tower);
+            if (out_plan->has_gf256_tower) out_plan->gf256_tower_poly = op->u.gf2m.irred_poly;
         }
     }
 
@@ -856,8 +873,16 @@ static inline bool qir_regalloc_pack(
                 bool has_consumer = false;
                 for (uint32_t ci = oi + 1u; ci < m->num_ops && !has_consumer; ++ci) {
                     if (op_skip[ci]) continue;
-                    for (uint16_t ii = 0u; ii < m->ops[ci].num_ins; ++ii) {
-                        if (m->ops[ci].ins[ii] == ov) { has_consumer = true; break; }
+                    const qir_op_t *cop = &m->ops[ci];
+                    const qir_enode_t *cen = (cop->num_outs > 0u)
+                        ? &eg->enodes[out_plan->chosen_enodes[cop->outs[0]]] : NULL;
+                    uint32_t cins[32];
+                    uint16_t ncins = qir__collect_op_inputs(m, cen, cop, op_skip, cins);
+                    for (uint16_t ii = 0u; ii < ncins; ++ii) {
+                        if (cins[ii] == ov) { has_consumer = true; break; }
+                    }
+                    for (uint16_t ii = 0u; ii < cop->num_ins && !has_consumer; ++ii) {
+                        if (cop->ins[ii] == ov) { has_consumer = true; break; }
                     }
                 }
                 if (!has_consumer) op_skip[oi] = 1u;
@@ -875,8 +900,14 @@ static inline bool qir_regalloc_pack(
         }
     }
 
-    qir__qpool_t pool;
-    memset(&pool, 0, sizeof(pool));
+    qir__qpool_t *pool = (qir__qpool_t *)calloc(1u, sizeof(qir__qpool_t));
+    if (!pool) {
+        free(op_skip); free(will_alias); free(is_direct_out); free(is_in); free(is_pinned_out);
+        free(hmr_measured); free(can_uncomp); free(computed); free(uncomputed);
+        free(fwd_refs); free(uncomp_pin); free(back_vals); free(back_cnt);
+        free(step_back_ins); free(step_back_cnt);
+        return false;
+    }
     uint32_t peak_q = 0u;
     uint32_t live_peak_q = 0u;
     uint32_t peak_op = 0u;
@@ -896,7 +927,7 @@ static inline bool qir_regalloc_pack(
             va->width  = w;
             va->qubits = w ? (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
             for (uint16_t b = 0u; b < w; ++b) {
-                va->qubits[b] = qir__pool_alloc_clean(&pool, &peak_q);
+                va->qubits[b] = qir__pool_alloc_clean(pool, &peak_q);
             }
         }
     }
@@ -1075,7 +1106,7 @@ static inline bool qir_regalloc_pack(
                 } else {
                     va->width  = w;
                     va->qubits = w ? (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
-                    for (uint16_t b = 0u; b < w; ++b) va->qubits[b] = qir__pool_alloc_clean(&pool, &peak_q);
+                    for (uint16_t b = 0u; b < w; ++b) va->qubits[b] = qir__pool_alloc_clean(pool, &peak_q);
                 }
             }
         }
@@ -1088,13 +1119,13 @@ static inline bool qir_regalloc_pack(
             va0->aux_width  = (uint16_t)need_aux;
             va0->aux_qubits = (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)need_aux * sizeof(uint32_t), 4u);
             for (uint32_t a = 0u; a < need_aux; ++a) {
-                va0->aux_qubits[a] = qir__pool_alloc_clean(&pool, &peak_q);
+                va0->aux_qubits[a] = qir__pool_alloc_clean(pool, &peak_q);
             }
         }
         st.num_temp_anc = need_temp;
         st.cbit_base    = cbit;
         cbit           += need_cb;
-        qir__alloc_step_temp(m, out_plan, &st, eg->arena, &pool, &peak_q, &certified);
+        qir__alloc_step_temp(m, out_plan, &st, eg->arena, pool, &peak_q, &certified);
 
         if (peak_q > live_peak_q) {
             live_peak_q = peak_q;
@@ -1145,7 +1176,7 @@ static inline bool qir_regalloc_pack(
                 fwd_refs[iv] == 0u && uncomp_pin[iv] == 0u) {
                 const qir_val_alloc_t *iva = &out_plan->val_allocs[iv];
                 for (uint16_t b = 0u; b < iva->width; ++b) {
-                    qir__pool_free_clean(&pool, iva->qubits[b]);
+                    qir__pool_free_clean(pool, iva->qubits[b]);
                 }
             }
         }
@@ -1190,7 +1221,7 @@ static inline bool qir_regalloc_pack(
                 ust.num_temp_anc = u_temp;
                 ust.cbit_base    = cbit;
                 cbit            += u_cb;
-                qir__alloc_step_temp(m, out_plan, &ust, eg->arena, &pool, &peak_q, &certified);
+                qir__alloc_step_temp(m, out_plan, &ust, eg->arena, pool, &peak_q, &certified);
                 if (ns >= max_steps) {
                     max_steps *= 2u;
                     out_plan->steps = (qir_sched_step_t *)realloc(out_plan->steps, max_steps * sizeof(qir_sched_step_t));
@@ -1199,8 +1230,8 @@ static inline bool qir_regalloc_pack(
 
                 for (uint8_t ko = 0u; ko < dop->num_outs; ++ko) {
                     const qir_val_alloc_t *uva = &out_plan->val_allocs[dop->outs[ko]];
-                    for (uint16_t b = 0u; b < uva->width; ++b) qir__pool_free_clean(&pool, uva->qubits[b]);
-                    for (uint16_t b = 0u; b < uva->aux_width; ++b) qir__pool_free_clean(&pool, uva->aux_qubits[b]);
+                    for (uint16_t b = 0u; b < uva->width; ++b) qir__pool_free_clean(pool, uva->qubits[b]);
+                    for (uint16_t b = 0u; b < uva->aux_width; ++b) qir__pool_free_clean(pool, uva->aux_qubits[b]);
                 }
                 uncomputed[uo] = 1u;
                 for (uint16_t bi = 0u; bi < step_back_cnt[uo]; ++bi) {
@@ -1216,28 +1247,32 @@ static inline bool qir_regalloc_pack(
     }
 
     /* Certify Clean Scratch: check whether any non-I/O qubit remains busy */
-    uint64_t io_busy[QIR_POOL_WORDS] = {0};
-    for (uint32_t i = 0u; i < m->num_inputs; ++i) {
-        const qir_val_alloc_t *va = &out_plan->val_allocs[m->inputs[i]];
-        for (uint16_t b = 0u; b < va->width; ++b) {
-            uint32_t q = va->qubits[b];
-            if (q < 8192u) io_busy[q >> 6u] |= (UINT64_C(1) << (q & 63u));
+    uint64_t *io_busy = (uint64_t *)calloc(QIR_POOL_WORDS, sizeof(uint64_t));
+    if (io_busy) {
+        for (uint32_t i = 0u; i < m->num_inputs; ++i) {
+            const qir_val_alloc_t *va = &out_plan->val_allocs[m->inputs[i]];
+            for (uint16_t b = 0u; b < va->width; ++b) {
+                uint32_t q = va->qubits[b];
+                if (q < QIR_POOL_MAX_Q) io_busy[q >> 6u] |= (UINT64_C(1) << (q & 63u));
+            }
+        }
+        for (uint32_t i = 0u; i < m->num_outputs; ++i) {
+            const qir_val_alloc_t *va = &out_plan->val_allocs[m->outputs[i]];
+            for (uint16_t b = 0u; b < va->width; ++b) {
+                uint32_t q = va->qubits[b];
+                if (q < QIR_POOL_MAX_Q) io_busy[q >> 6u] |= (UINT64_C(1) << (q & 63u));
+            }
         }
     }
-    for (uint32_t i = 0u; i < m->num_outputs; ++i) {
-        const qir_val_alloc_t *va = &out_plan->val_allocs[m->outputs[i]];
-        for (uint16_t b = 0u; b < va->width; ++b) {
-            uint32_t q = va->qubits[b];
-            if (q < 8192u) io_busy[q >> 6u] |= (UINT64_C(1) << (q & 63u));
-        }
-    }
-    bool clean_ok = true;
-    for (uint32_t q = 0u; q < peak_q; ++q) {
-        if (qir__pool_is_busy(&pool, q) && !((io_busy[q >> 6u] >> (q & 63u)) & 1u)) {
+    bool clean_ok = (io_busy != NULL);
+    for (uint32_t q = 0u; q < peak_q && clean_ok; ++q) {
+        if (qir__pool_is_busy(pool, q) && !((io_busy[q >> 6u] >> (q & 63u)) & 1u)) {
             clean_ok = false;
             break;
         }
     }
+    free(io_busy);
+    free(pool);
 
     out_plan->num_steps               = ns;
     out_plan->disjointness_certified  = certified;
@@ -1386,7 +1421,6 @@ static inline bool qir_optimize_module(
         n_egraph_vars       += b;
         n_multi++;
     }
-    free(all_multi);
     free(multi_score);
 
     /* Rank uncompute-capable ops by output width & cost so SEARU targets high-value uncomputation first */
@@ -1462,6 +1496,42 @@ static inline bool qir_optimize_module(
     for (uint32_t c = 0u; c < eg->num_classes; ++c) {
         base_choices[c] = eg->classes[c].num_enodes ? eg->classes[c].enodes[0] : 0u;
     }
+    if (n_all_multi > n_multi || mod->num_ops > 200u) {
+        static const qir_variant_kind_t tail_pref[] = {
+            QIR_VAR_GF2M_TOWER_INV,
+            QIR_VAR_GF2M_RANK27,
+            QIR_VAR_GF2M_CHUDNOVSKY_R42,
+            QIR_VAR_GF2M_RANK15,
+            QIR_VAR_GF2M_CONST_LINF2,
+            QIR_VAR_LINF2_GAUSS,
+            QIR_VAR_CTRL_ADD_CUCCARO,
+            QIR_VAR_XOR_ACCUM,
+            QIR_VAR_CSA_TREE,
+            QIR_VAR_INPLACE_ARITH,
+            QIR_VAR_HMR_PARITY_LUT
+        };
+        uint32_t seed_start = (mod->num_ops > 200u) ? 0u : n_multi;
+        for (uint32_t i = seed_start; i < n_all_multi; ++i) {
+            uint32_t cid = all_multi[i];
+            const qir_eclass_t *ec = &eg->classes[cid];
+            uint32_t dop = mod->vals[cid].def_op;
+            qir_op_kind_t ok = (dop != UINT32_MAX) ? mod->ops[dop].kind : QIR_OP_COUNT;
+            bool picked = false;
+            for (size_t pi = 0u; pi < sizeof(tail_pref) / sizeof(tail_pref[0]) && !picked; ++pi) {
+                if (tail_pref[pi] == QIR_VAR_HMR_PARITY_LUT && ok != QIR_OP_GF2M_MUL) continue;
+                for (uint32_t ei = 0u; ei < ec->num_enodes; ++ei) {
+                    uint32_t eid = ec->enodes[ei];
+                    const qir_enode_t *en = &eg->enodes[eid];
+                    if (en->variant != tail_pref[pi]) continue;
+                    if (en->rule_tag != 0u && !((cfg.enabled_rules >> en->rule_tag) & 1u)) continue;
+                    base_choices[cid] = eid;
+                    picked = true;
+                    break;
+                }
+            }
+        }
+    }
+    free(all_multi);
 
     /* Phase 1: Baseline SEED plan evaluation */
     qir_phys_plan_t best_plan;
@@ -1475,7 +1545,8 @@ static inline bool qir_optimize_module(
     uint64_t best_score = qir__score_plan(&best_plan, &cfg);
 
     /* Phase 1b: Single-class coordinate sweep so SEARU starts from exact rule-enabled best */
-    for (uint32_t mi = 0u; mi < n_multi; ++mi) {
+    uint32_t sweep_lim = (mod->num_ops > 200u && n_multi > 24u) ? 24u : n_multi;
+    for (uint32_t mi = 0u; mi < sweep_lim; ++mi) {
         uint32_t cid = multi_cls[mi];
         const qir_eclass_t *ec = &eg->classes[cid];
         uint32_t best_eid = base_choices[cid];

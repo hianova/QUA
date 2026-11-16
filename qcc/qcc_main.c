@@ -25,7 +25,7 @@ static void print_usage(FILE *out) {
             "Subcommands:\n"
             "  qcc opt <in.qir|in.kmb> -o <out.kmb> [--max-q N] [--metric default|qc|q2t|qt] [--iters N] [--verify-batches N] [--emit-qir post.qir] [--clean-anc] [--emit-clean-reg]\n"
             "  qcc lift <in.kmb> -o <out.qir>\n"
-            "  qcc verify <circuit.kmb> [--ref <ref.kmb|ref.qir>] [--states N]\n"
+            "  qcc verify <circuit.kmb> [--ref <ref.kmb|ref.qir>] [--states N] [--in-regs N]\n"
             "  qcc inspect <circuit.kmb>\n"
             "  qcc selftest\n");
 }
@@ -54,7 +54,7 @@ static int cmd_inspect(int argc, char **argv) {
     }
     qcc_kmb_stats_t st;
     qcc_kmb_recompute_stats(&kmb, &st);
-    printf("[qcc inspect] %s | Q=%u B=%u ops=%llu CCX=%llu Z_POW=%llu T_LIKE=%llu HMR=%llu D_react=%llu\n",
+    printf("[qcc inspect] %s | Q=%u B=%u ops=%llu CCX=%llu Z_POW=%llu T_LIKE=%llu HMR=%llu D_react=%llu D_toff=%llu D_circ=%llu\n",
            in_path,
            (unsigned)st.num_qubits, (unsigned)st.num_bits,
            (unsigned long long)st.num_ops,
@@ -62,7 +62,9 @@ static int cmd_inspect(int argc, char **argv) {
            (unsigned long long)st.z_pow,
            (unsigned long long)st.t_like,
            (unsigned long long)st.hmr,
-           (unsigned long long)st.reaction_depth);
+           (unsigned long long)st.reaction_depth,
+           (unsigned long long)st.toffoli_depth,
+           (unsigned long long)st.circuit_depth);
     printf("Registers (%u):\n", (unsigned)kmb.num_regs);
     for (uint32_t r = 0u; r < kmb.num_regs; ++r) {
         uint32_t nq = 0u, nb = 0u;
@@ -262,14 +264,17 @@ static int cmd_opt(int argc, char **argv) {
 static int cmd_verify(int argc, char **argv) {
     const char *cand_path = NULL, *ref_path = NULL;
     uint32_t num_states = 4096u;
+    int32_t in_regs_opt = -1;
     for (int i = 2; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: qcc verify <circuit.kmb> [--ref <ref.kmb|ref.qir>] [--states N]\n");
+            printf("Usage: qcc verify <circuit.kmb> [--ref <ref.kmb|ref.qir>] [--states N] [--in-regs N]\n");
             return 0;
         } else if (strcmp(argv[i], "--ref") == 0 && i + 1 < argc) {
             ref_path = argv[++i];
         } else if (strcmp(argv[i], "--states") == 0 && i + 1 < argc) {
             num_states = (uint32_t)strtoul(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--in-regs") == 0 && i + 1 < argc) {
+            in_regs_opt = (int32_t)strtol(argv[++i], NULL, 10);
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "Error: unknown or incomplete option '%s'\n", argv[i]);
             return 2;
@@ -278,7 +283,7 @@ static int cmd_verify(int argc, char **argv) {
         }
     }
     if (!cand_path) {
-        fprintf(stderr, "Usage: qcc verify <circuit.kmb> [--ref <ref.kmb|ref.qir>] [--states N]\n");
+        fprintf(stderr, "Usage: qcc verify <circuit.kmb> [--ref <ref.kmb|ref.qir>] [--states N] [--in-regs N]\n");
         return 2;
     }
 
@@ -293,28 +298,82 @@ static int cmd_verify(int argc, char **argv) {
     if (batches == 0u) batches = 1u;
 
     if (!ref_path) {
-        /* Self-consistency dual-seed check on declared input/IO registers (keeping @clean/work ancillas |0>) */
+        /* Self-consistency dual-seed check on declared IO registers; clean-pool outputs & @clean stay |0> */
+        uint32_t mask_nq = cand.num_qubits > cst.num_qubits ? cand.num_qubits : cst.num_qubits;
+        if (mask_nq == 0u) mask_nq = 1u;
+        uint8_t *init_mask = (uint8_t *)calloc(mask_nq, 1u);
+        uint8_t *cmp_mask  = (uint8_t *)calloc(mask_nq, 1u);
+        uint8_t *q_has_reset = (uint8_t *)calloc(mask_nq, 1u);
+        if (q_has_reset) {
+            qcc_kmb_cursor_t cur;
+            qcc_kmb_cursor_init(&cur);
+            qcc_kmb_op_view_t v;
+            while (qcc_kmb_cursor_next(&cand, &cur, &v)) {
+                uint8_t base = v.op & (uint8_t)(~QCC_OP_FLAG_COND);
+                if ((base == QCC_OP_HMR || base == QCC_OP_R) && v.q[0] < mask_nq) {
+                    q_has_reset[v.q[0]] = 1u;
+                }
+            }
+        }
+        uint32_t cmp_count = 0u;
         uint32_t io_q = 0u;
-        if (cand.num_regs > 0u) {
+        uint32_t non_at_idx = 0u;
+        bool seen_out_reg = false;
+        if (cand.num_regs > 0u && init_mask && cmp_mask && q_has_reset) {
             for (uint32_t r = 0u; r < cand.num_regs; ++r) {
                 if (cand.regs[r].name[0] == '@') continue;
+                bool has_q = false;
+                bool has_reset = false;
+                for (uint32_t j = 0u; j < cand.regs[r].len; ++j) {
+                    uint32_t tgt = cand.regs[r].targets[j];
+                    if (tgt & UINT32_C(0x80000000)) {
+                        has_q = true;
+                        uint32_t q = tgt & UINT32_C(0x7FFFFFFF);
+                        if (q < mask_nq && q_has_reset[q] != 0u) has_reset = true;
+                    }
+                }
+                if (!has_q) continue;
+                bool is_in_reg = false;
+                if (in_regs_opt >= 0) {
+                    is_in_reg = ((int32_t)non_at_idx < in_regs_opt);
+                } else {
+                    if (non_at_idx > 0u && has_reset) seen_out_reg = true;
+                    is_in_reg = !seen_out_reg;
+                }
+                non_at_idx++;
                 for (uint32_t j = 0u; j < cand.regs[r].len; ++j) {
                     uint32_t tgt = cand.regs[r].targets[j];
                     if (tgt & UINT32_C(0x80000000)) {
                         uint32_t q = tgt & UINT32_C(0x7FFFFFFF);
+                        if (q < mask_nq) {
+                            if (cmp_mask[q] == 0u) {
+                                cmp_mask[q] = 1u;
+                                cmp_count++;
+                            }
+                            if (is_in_reg) init_mask[q] = 1u;
+                        }
                         if (q + 1u > io_q) io_q = q + 1u;
                     }
                 }
             }
         }
-        if (io_q == 0u) io_q = cst.num_qubits;
         qir_verify_report_t rep;
-        bool ok = qir_verify_kmb_vs_kmb(&cand, &cand, io_q, batches, UINT64_C(0xCAFEBABE), &rep);
-        printf("[qcc verify] %s | Q=%u B=%u CCX=%llu Z_POW=%llu HMR=%llu D_react=%llu | dual-seed=%s (%llu states)\n",
+        bool ok = qir_verify_kmb_vs_kmb_mask(
+            &cand, &cand,
+            cmp_count > 0u ? io_q : cst.num_qubits,
+            (cmp_count > 0u && init_mask) ? init_mask : NULL,
+            (cmp_count > 0u && cmp_mask)  ? cmp_mask  : NULL,
+            batches, UINT64_C(0xCAFEBABE), &rep
+        );
+        printf("[qcc verify] %s | Q=%u B=%u CCX=%llu Z_POW=%llu HMR=%llu D_toff=%llu D_circ=%llu D_react=%llu | dual-seed=%s (%llu states)\n",
                cand_path, (unsigned)cst.num_qubits, (unsigned)cst.num_bits,
                (unsigned long long)cst.toffoli, (unsigned long long)cst.z_pow,
-               (unsigned long long)cst.hmr, (unsigned long long)cst.reaction_depth,
+               (unsigned long long)cst.hmr, (unsigned long long)cst.toffoli_depth,
+               (unsigned long long)cst.circuit_depth, (unsigned long long)cst.reaction_depth,
                ok ? "PASS" : "FAIL", (unsigned long long)rep.states_tested);
+        free(init_mask);
+        free(cmp_mask);
+        free(q_has_reset);
         qcc_kmb_free(&cand);
         return ok ? 0 : 1;
     }
@@ -1353,6 +1412,51 @@ static int cmd_selftest(void) {
         if (!test_compile_and_verify("T20c_GF2M_Const_Linf2_R11", &m, &ar, &cfg, 4u, false, true, false, 0u, &st) ||
             st.num_qubits != 12u) {
             printf("  FAIL [T20c expected Q=12 CCX=0, got Q=%u CCX=%llu]\n",
+                   st.num_qubits, (unsigned long long)st.toffoli);
+            fails++;
+        }
+        qir_module_free(&m);
+        qcc_arena_free(&ar);
+    }
+
+    /* T21: GF(2^8) (AES 0x11B) Rank-27 Mul (27 CCX) + 3-Level Tower Inv (36/18 CCX, Ctrl 38 CCX) */
+    {
+        qcc_arena_t ar; qcc_arena_init(&ar, 512u * 1024u);
+        qir_module_t m; qir_module_init(&m, &ar, "t21a_gf256_tower");
+        m.require_clean_scratch = true;
+        uint32_t a     = qir_add_input(&m, 8u, "a");
+        uint32_t b     = qir_add_input(&m, 8u, "b");
+        uint32_t inv_a = qir_emit_gf2m_inv(&m, a, 8u, 0x11Bu, "inv_a");
+        uint32_t prod  = qir_emit_gf2m_mul(&m, inv_a, b, 8u, 0x11Bu, "prod");
+        qir_add_output(&m, prod);
+        qir_recompute_zero_masks(&m);
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        cfg.require_clean_scratch = true;
+        qcc_kmb_stats_t st;
+        if (!test_compile_and_verify("T21a_GF256_TowerInv_Mul27", &m, &ar, &cfg, 512u, false, false, false, 0u, &st) ||
+            st.toffoli != 81u) {
+            printf("  FAIL [T21a expected CCX=81, got Q=%u CCX=%llu]\n",
+                   st.num_qubits, (unsigned long long)st.toffoli);
+            fails++;
+        }
+        qir_module_free(&m);
+        qcc_arena_free(&ar);
+    }
+    {
+        qcc_arena_t ar; qcc_arena_init(&ar, 512u * 1024u);
+        qir_module_t m; qir_module_init(&m, &ar, "t21b_gf256_ctrl_inv");
+        m.require_clean_scratch = true;
+        uint32_t a    = qir_add_input(&m, 8u, "a");
+        uint32_t ctrl = qir_add_input(&m, 1u, "ctrl");
+        uint32_t invc = qir_emit_gf2m_inv_ctrl(&m, a, ctrl, 8u, 0x11Bu, "invc");
+        qir_add_output(&m, invc);
+        qir_recompute_zero_masks(&m);
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        cfg.require_clean_scratch = true;
+        qcc_kmb_stats_t st;
+        if (!test_compile_and_verify("T21b_GF256_CtrlTowerInv", &m, &ar, &cfg, 256u, false, false, false, 0u, &st) ||
+            st.toffoli != 38u) {
+            printf("  FAIL [T21b expected CCX=38, got Q=%u CCX=%llu]\n",
                    st.num_qubits, (unsigned long long)st.toffoli);
             fails++;
         }

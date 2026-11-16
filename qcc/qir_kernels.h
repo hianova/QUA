@@ -1935,6 +1935,398 @@ static inline void qk_gf12_inv_tower_uncompute(
 }
 
 /* ============================================================================
+ * GF(4), GF(16) and GF(2^8) Bilinear Multipliers & 3-Level Tower Inversion
+ * ============================================================================ */
+static inline void qk__gf_bilinear_compute_u8(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    uint32_t deg,
+    const uint32_t *qa,
+    const uint32_t *qb,
+    const uint32_t *qout,
+    uint32_t anc_prod,
+    uint32_t *next_cbit,
+    uint32_t rank,
+    const uint8_t *l_mask,
+    const uint8_t *r_mask,
+    const uint8_t *w_mask,
+    const uint32_t *order_opt
+) {
+    if (cost && cost->temp_anc_needed < 1u) cost->temp_anc_needed = 1u;
+    if (cost && cost->scratch_bits_needed < 1u) cost->scratch_bits_needed = 1u;
+    uint32_t sb = next_cbit ? *next_cbit : 0u;
+    for (uint32_t step = 0u; step < rank; ++step) {
+        uint32_t p = order_opt ? order_opt[step] : step;
+        uint8_t lm = l_mask[p], rm = r_mask[p], wm = w_mask[p];
+        if (!lm || !rm || !wm) continue;
+        uint32_t piv_a = (uint32_t)__builtin_ctz((unsigned)lm);
+        uint32_t piv_b = (uint32_t)__builtin_ctz((unsigned)rm);
+        for (uint32_t i = piv_a + 1u; i < deg; ++i) {
+            if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+        }
+        for (uint32_t j = piv_b + 1u; j < deg; ++j) {
+            if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+        }
+        qk_and_compute(kb, cost, qk__q(qa, piv_a), qk__q(qb, piv_b), anc_prod);
+        for (uint32_t k = 0u; k < deg; ++k) {
+            if ((wm >> k) & 1u) qk_cx(kb, cost, anc_prod, qk__q(qout, k));
+        }
+        qk_and_uncompute(kb, cost, qk__q(qa, piv_a), qk__q(qb, piv_b), anc_prod, sb);
+        for (uint32_t j = deg - 1u; j > piv_b; --j) {
+            if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+        }
+        for (uint32_t i = deg - 1u; i > piv_a; --i) {
+            if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+        }
+    }
+    if (next_cbit) (*next_cbit)++;
+}
+
+static inline void qk__gf_bilinear_uncompute_hmr_u8(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    uint32_t deg,
+    const uint32_t *qa,
+    const uint32_t *qb,
+    const uint32_t *qout,
+    uint32_t *next_cbit,
+    uint32_t rank,
+    const uint8_t *l_mask,
+    const uint8_t *r_mask,
+    const uint8_t *w_mask,
+    const uint32_t *order_opt
+) {
+    if (deg == 0u || deg > 8u) return;
+    if (cost && cost->scratch_bits_needed < deg + 1u) cost->scratch_bits_needed = deg + 1u;
+    uint32_t base = next_cbit ? *next_cbit : 0u;
+    uint32_t mbits[8];
+    for (uint32_t k = 0u; k < deg; ++k) {
+        mbits[k] = base + k;
+        qk_hmr(kb, cost, qk__q(qout, k), mbits[k]);
+    }
+    uint32_t pbit = base + deg;
+    for (uint32_t step = 0u; step < rank; ++step) {
+        uint32_t p = order_opt ? order_opt[step] : step;
+        uint8_t lm = l_mask[p], rm = r_mask[p], wm = w_mask[p];
+        if (!lm || !rm || !wm) continue;
+        qk_bit_store0(kb, cost, pbit);
+        for (uint32_t k = 0u; k < deg; ++k) {
+            if ((wm >> k) & 1u) qk_bit_invert_if(kb, cost, pbit, mbits[k]);
+        }
+        uint32_t piv_a = (uint32_t)__builtin_ctz((unsigned)lm);
+        uint32_t piv_b = (uint32_t)__builtin_ctz((unsigned)rm);
+        for (uint32_t i = piv_a + 1u; i < deg; ++i) {
+            if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+        }
+        for (uint32_t j = piv_b + 1u; j < deg; ++j) {
+            if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+        }
+        qk_cz_if(kb, cost, qk__q(qa, piv_a), qk__q(qb, piv_b), pbit);
+        for (uint32_t j = deg - 1u; j > piv_b; --j) {
+            if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+        }
+        for (uint32_t i = deg - 1u; i > piv_a; --i) {
+            if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+        }
+    }
+    if (next_cbit) *next_cbit = base + deg + 1u;
+}
+
+static inline void qk_gf4_mul_r3_compute(
+    qcc_kmb_circuit_t *kb, qir_kernel_cost_t *cost,
+    const uint32_t *qa, const uint32_t *qb, const uint32_t *qout,
+    uint32_t anc_prod, uint32_t *next_cbit
+) {
+    static const uint8_t LM[3] = {1u, 2u, 3u};
+    static const uint8_t RM[3] = {1u, 2u, 3u};
+    static const uint8_t WM[3] = {3u, 1u, 2u};
+    qk__gf_bilinear_compute_u8(kb, cost, 2u, qa, qb, qout, anc_prod, next_cbit, 3u, LM, RM, WM, NULL);
+}
+
+static inline void qk_gf4_mul_r3_uncompute_hmr(
+    qcc_kmb_circuit_t *kb, qir_kernel_cost_t *cost,
+    const uint32_t *qa, const uint32_t *qb, const uint32_t *qout,
+    uint32_t *next_cbit
+) {
+    static const uint8_t LM[3] = {1u, 2u, 3u};
+    static const uint8_t RM[3] = {1u, 2u, 3u};
+    static const uint8_t WM[3] = {3u, 1u, 2u};
+    qk__gf_bilinear_uncompute_hmr_u8(kb, cost, 2u, qa, qb, qout, next_cbit, 3u, LM, RM, WM, NULL);
+}
+
+static inline void qk_gf16_mul_r9_compute(
+    qcc_kmb_circuit_t *kb, qir_kernel_cost_t *cost,
+    const uint32_t *qa, const uint32_t *qb, const uint32_t *qout,
+    uint32_t anc_prod, uint32_t *next_cbit
+) {
+    static const uint8_t LM[9] = {0x1u, 0x2u, 0x3u, 0x4u, 0x8u, 0xCu, 0x5u, 0xAu, 0xFu};
+    static const uint8_t RM[9] = {0x1u, 0x2u, 0x3u, 0x4u, 0x8u, 0xCu, 0x5u, 0xAu, 0xFu};
+    static const uint8_t WM[9] = {0xFu, 0x5u, 0xAu, 0x1u, 0x2u, 0x3u, 0xCu, 0x4u, 0x8u};
+    qk__gf_bilinear_compute_u8(kb, cost, 4u, qa, qb, qout, anc_prod, next_cbit, 9u, LM, RM, WM, NULL);
+}
+
+static inline void qk_gf16_mul_r9_uncompute_hmr(
+    qcc_kmb_circuit_t *kb, qir_kernel_cost_t *cost,
+    const uint32_t *qa, const uint32_t *qb, const uint32_t *qout,
+    uint32_t *next_cbit
+) {
+    static const uint8_t LM[9] = {0x1u, 0x2u, 0x3u, 0x4u, 0x8u, 0xCu, 0x5u, 0xAu, 0xFu};
+    static const uint8_t RM[9] = {0x1u, 0x2u, 0x3u, 0x4u, 0x8u, 0xCu, 0x5u, 0xAu, 0xFu};
+    static const uint8_t WM[9] = {0xFu, 0x5u, 0xAu, 0x1u, 0x2u, 0x3u, 0xCu, 0x4u, 0x8u};
+    qk__gf_bilinear_uncompute_hmr_u8(kb, cost, 4u, qa, qb, qout, next_cbit, 9u, LM, RM, WM, NULL);
+}
+
+static inline void qk_gf256_mul_r27_compute(
+    qcc_kmb_circuit_t *kb, qir_kernel_cost_t *cost,
+    const uint32_t *qa, const uint32_t *qb, const uint32_t *qout,
+    uint32_t anc_prod, uint32_t *next_cbit, const qir_gf256_rank27_t *plan
+) {
+    qk__gf_bilinear_compute_u8(kb, cost, 8u, qa, qb, qout, anc_prod, next_cbit,
+                               QIR_GF256_RANK, plan->l_mask, plan->r_mask, plan->w_mask, plan->order);
+}
+
+static inline void qk_gf256_mul_r27_uncompute_hmr(
+    qcc_kmb_circuit_t *kb, qir_kernel_cost_t *cost,
+    const uint32_t *qa, const uint32_t *qb, const uint32_t *qout,
+    uint32_t *next_cbit, const qir_gf256_rank27_t *plan
+) {
+    qk__gf_bilinear_uncompute_hmr_u8(kb, cost, 8u, qa, qb, qout, next_cbit,
+                                     QIR_GF256_RANK, plan->l_mask, plan->r_mask, plan->w_mask, plan->order);
+}
+
+typedef struct {
+    qcc_bv256_t to_tower[8];
+    qcc_bv256_t from_tower[8];
+    qcc_bv256_t sq16_mat[4];
+    qcc_bv256_t nu_sq_mat[4];
+} qir_gf256_tower_inv_plan_t;
+
+static inline bool qir_build_gf256_tower_inv(uint32_t poly8, qir_gf256_tower_inv_plan_t *out) {
+    memset(out, 0, sizeof(*out));
+    uint8_t u_elem = 0u, v_elem = 0u;
+    for (uint32_t cand = 2u; cand < 256u; ++cand) {
+        uint32_t c2 = qir__gf2m_mul_u32(cand, cand, 8u, poly8);
+        if ((c2 ^ cand ^ 1u) == 0u) { u_elem = (uint8_t)cand; break; }
+    }
+    if (u_elem == 0u) return false;
+    for (uint32_t cand = 2u; cand < 256u; ++cand) {
+        uint32_t c2 = qir__gf2m_mul_u32(cand, cand, 8u, poly8);
+        if ((c2 ^ cand ^ (uint32_t)u_elem) == 0u) { v_elem = (uint8_t)cand; break; }
+    }
+    if (v_elem == 0u) return false;
+
+    uint8_t b16[4] = {
+        1u, u_elem, v_elem,
+        (uint8_t)qir__gf2m_mul_u32(u_elem, v_elem, 8u, poly8)
+    };
+    uint8_t w_elem = 0u, nu4 = 0u;
+    for (uint32_t g = 2u; g < 256u && !w_elem; ++g) {
+        uint32_t g2  = qir__gf2m_mul_u32(g, g, 8u, poly8);
+        uint32_t sum = g2 ^ g;
+        for (uint8_t c16 = 1u; c16 < 16u; ++c16) {
+            uint32_t val = 0u;
+            for (uint32_t b = 0u; b < 4u; ++b) if ((c16 >> b) & 1u) val ^= b16[b];
+            if (val == sum) {
+                bool in_sub = false;
+                for (uint8_t d16 = 0u; d16 < 16u; ++d16) {
+                    uint32_t v2 = 0u;
+                    for (uint32_t b = 0u; b < 4u; ++b) if ((d16 >> b) & 1u) v2 ^= b16[b];
+                    if (v2 == g) { in_sub = true; break; }
+                }
+                if (!in_sub) { w_elem = (uint8_t)g; nu4 = c16; break; }
+            }
+        }
+    }
+    if (w_elem == 0u) return false;
+
+    uint8_t basis8[8], mat[8], inv[8];
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        basis8[i]      = b16[i];
+        basis8[4u + i] = (uint8_t)qir__gf2m_mul_u32(b16[i], w_elem, 8u, poly8);
+    }
+    for (uint32_t r = 0u; r < 8u; ++r) {
+        uint8_t row = 0u;
+        for (uint32_t c = 0u; c < 8u; ++c) if ((basis8[c] >> r) & 1u) row |= (uint8_t)(1u << c);
+        mat[r] = row;
+        inv[r] = (uint8_t)(1u << r);
+    }
+    for (uint32_t col = 0u; col < 8u; ++col) {
+        uint32_t piv = col;
+        while (piv < 8u && (((mat[piv] >> col) & 1u) == 0u)) ++piv;
+        if (piv == 8u) return false;
+        if (piv != col) {
+            uint8_t tm = mat[col]; mat[col] = mat[piv]; mat[piv] = tm;
+            uint8_t ti = inv[col]; inv[col] = inv[piv]; inv[piv] = ti;
+        }
+        for (uint32_t r = 0u; r < 8u; ++r) {
+            if (r != col && ((mat[r] >> col) & 1u)) {
+                mat[r] ^= mat[col];
+                inv[r] ^= inv[col];
+            }
+        }
+    }
+    for (uint32_t r = 0u; r < 8u; ++r) {
+        out->to_tower[r].w[0] = inv[r];
+        uint8_t frow = 0u;
+        for (uint32_t c = 0u; c < 8u; ++c) if ((basis8[c] >> r) & 1u) frow |= (uint8_t)(1u << c);
+        out->from_tower[r].w[0] = frow;
+    }
+    for (uint32_t c = 0u; c < 4u; ++c) {
+        uint8_t b  = (uint8_t)(1u << c);
+        uint8_t sq = qir__gf16_tower_mul(b, b);
+        uint8_t v  = qir__gf16_tower_mul(nu4, sq);
+        for (uint32_t r = 0u; r < 4u; ++r) {
+            if ((sq >> r) & 1u) qcc_bv_set(out->sq16_mat[r].w, c);
+            if ((v >> r) & 1u)  qcc_bv_set(out->nu_sq_mat[r].w, c);
+        }
+    }
+
+    /* Exhaustive 256-entry algebraic self-test against qir__gf2m_inv_u32 */
+    for (uint32_t a = 0u; a < 256u; ++a) {
+        uint8_t xt = 0u;
+        for (uint32_t r = 0u; r < 8u; ++r) {
+            if (__builtin_parity((unsigned)(inv[r] & a))) xt |= (uint8_t)(1u << r);
+        }
+        uint8_t x0 = (uint8_t)(xt & 0xFu), x1 = (uint8_t)(xt >> 4u);
+        uint8_t x0p = (uint8_t)(x0 ^ x1);
+        uint8_t delta = qir__gf16_tower_mul(x0p, x1);
+        delta ^= qir__gf16_tower_mul(x0p, x0p);
+        delta ^= qir__gf16_tower_mul(nu4, qir__gf16_tower_mul(x1, x1));
+        uint8_t d0 = (uint8_t)(delta & 3u), d1 = (uint8_t)(delta >> 2u);
+        uint8_t d0p = (uint8_t)(d0 ^ d1);
+        uint8_t dnorm = (uint8_t)(qir__gf4_mul(d0p, d1) ^ qir__gf4_mul(d0p, d0p) ^
+                                  qir__gf4_mul(2u, qir__gf4_mul(d1, d1)));
+        uint8_t dinv2 = (uint8_t)(dnorm ^ ((dnorm >> 1u) & 1u)); /* c^2 = c^{-1} in GF(4) */
+        uint8_t dinv  = (uint8_t)(qir__gf4_mul(d0p, dinv2) | (qir__gf4_mul(d1, dinv2) << 2u));
+        uint8_t y0 = qir__gf16_tower_mul(x0p, dinv);
+        uint8_t y1 = qir__gf16_tower_mul(x1, dinv);
+        uint8_t yt = (uint8_t)(y0 | (y1 << 4u));
+        uint32_t got = 0u;
+        for (uint32_t t = 0u; t < 8u; ++t) if ((yt >> t) & 1u) got ^= basis8[t];
+        if (got != qir__gf2m_inv_u32(a, 8u, poly8)) return false;
+    }
+    return true;
+}
+
+static inline void qk_gf256_inv_tower_ex(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    const uint32_t *qa,
+    const uint32_t *qout,
+    uint32_t ctrl_q,
+    const uint32_t *anc,
+    uint32_t *next_cbit,
+    const qir_gf256_tower_inv_plan_t *plan,
+    bool uncomp
+) {
+    bool has_ctrl = (ctrl_q != UINT32_MAX);
+    uint32_t need_anc = has_ctrl ? 13u : 11u;
+    if (cost && cost->temp_anc_needed < need_anc) cost->temp_anc_needed = need_anc;
+    if (cost && cost->scratch_bits_needed < 32u) cost->scratch_bits_needed = 32u;
+
+    qk_linf2_inplace(kb, cost, qa, 8u, plan->to_tower, NULL);
+    if (uncomp) qk_linf2_inplace(kb, cost, qout, 8u, plan->to_tower, NULL);
+
+    uint32_t qx0[4], qx1[4], qy0[4], qy1[4];
+    uint32_t delta[4], d_norm[2], dinv[4], d_inv_eff[2];
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        qx0[i]   = qk__q(qa, i);
+        qx1[i]   = qk__q(qa, 4u + i);
+        qy0[i]   = qk__q(qout, i);
+        qy1[i]   = qk__q(qout, 4u + i);
+        delta[i] = qk__q(anc, i);
+        dinv[i]  = qk__q(anc, 6u + i);
+        qk_r(kb, cost, delta[i]);
+        qk_r(kb, cost, dinv[i]);
+    }
+    for (uint32_t i = 0u; i < 2u; ++i) {
+        d_norm[i] = qk__q(anc, 4u + i);
+        qk_r(kb, cost, d_norm[i]);
+        if (has_ctrl) {
+            d_inv_eff[i] = qk__q(anc, 11u + i);
+            qk_r(kb, cost, d_inv_eff[i]);
+        } else {
+            d_inv_eff[i] = d_norm[i];
+        }
+    }
+    uint32_t anc_prod = qk__q(anc, 10u);
+
+    for (uint32_t i = 0u; i < 4u; ++i) qk_cx(kb, cost, qx1[i], qx0[i]);
+    qk_gf16_mul_r9_compute(kb, cost, qx0, qx1, delta, anc_prod, next_cbit);
+    qk_linf2_out_of_place(kb, cost, qx0, 4u, delta, 4u, plan->sq16_mat, NULL);
+    qk_linf2_out_of_place(kb, cost, qx1, 4u, delta, 4u, plan->nu_sq_mat, NULL);
+
+    for (uint32_t i = 0u; i < 2u; ++i) qk_cx(kb, cost, delta[2u + i], delta[i]);
+    qk_gf4_mul_r3_compute(kb, cost, delta, delta + 2u, d_norm, anc_prod, next_cbit);
+    /* Add d0'^2 + u * d1^2 into d_norm in GF(4) */
+    qk_cx(kb, cost, delta[0], d_norm[0]);
+    qk_cx(kb, cost, delta[1], d_norm[0]);
+    qk_cx(kb, cost, delta[1], d_norm[1]);
+    qk_cx(kb, cost, delta[3], d_norm[0]);
+    qk_cx(kb, cost, delta[2], d_norm[1]);
+    /* d_norm^{-1} = d_norm^2 in GF(4) via single in-place CNOT */
+    qk_cx(kb, cost, d_norm[1], d_norm[0]);
+
+    const uint32_t *d_use = d_norm;
+    if (has_ctrl) {
+        for (uint32_t i = 0u; i < 2u; ++i) qk_and_compute(kb, cost, ctrl_q, d_norm[i], d_inv_eff[i]);
+        d_use = d_inv_eff;
+    }
+
+    qk_gf4_mul_r3_compute(kb, cost, delta, d_use, dinv, anc_prod, next_cbit);
+    qk_gf4_mul_r3_compute(kb, cost, delta + 2u, d_use, dinv + 2u, anc_prod, next_cbit);
+
+    if (!uncomp) {
+        qk_gf16_mul_r9_compute(kb, cost, qx0, dinv, qy0, anc_prod, next_cbit);
+        qk_gf16_mul_r9_compute(kb, cost, qx1, dinv, qy1, anc_prod, next_cbit);
+    } else {
+        qk_gf16_mul_r9_uncompute_hmr(kb, cost, qx0, dinv, qy0, next_cbit);
+        qk_gf16_mul_r9_uncompute_hmr(kb, cost, qx1, dinv, qy1, next_cbit);
+    }
+
+    qk_gf4_mul_r3_uncompute_hmr(kb, cost, delta + 2u, d_use, dinv + 2u, next_cbit);
+    qk_gf4_mul_r3_uncompute_hmr(kb, cost, delta, d_use, dinv, next_cbit);
+    if (has_ctrl) {
+        uint32_t sb_eff = next_cbit ? (*next_cbit)++ : 0u;
+        for (uint32_t i = 2u; i > 0u; --i) {
+            qk_and_uncompute(kb, cost, ctrl_q, d_norm[i - 1u], d_inv_eff[i - 1u], sb_eff);
+        }
+    }
+    qk_cx(kb, cost, d_norm[1], d_norm[0]);
+    qk_cx(kb, cost, delta[2], d_norm[1]);
+    qk_cx(kb, cost, delta[3], d_norm[0]);
+    qk_cx(kb, cost, delta[1], d_norm[1]);
+    qk_cx(kb, cost, delta[1], d_norm[0]);
+    qk_cx(kb, cost, delta[0], d_norm[0]);
+    qk_gf4_mul_r3_uncompute_hmr(kb, cost, delta, delta + 2u, d_norm, next_cbit);
+    for (uint32_t i = 0u; i < 2u; ++i) qk_cx(kb, cost, delta[2u + i], delta[i]);
+
+    qk_linf2_out_of_place(kb, cost, qx1, 4u, delta, 4u, plan->nu_sq_mat, NULL);
+    qk_linf2_out_of_place(kb, cost, qx0, 4u, delta, 4u, plan->sq16_mat, NULL);
+    qk_gf16_mul_r9_uncompute_hmr(kb, cost, qx0, qx1, delta, next_cbit);
+
+    for (uint32_t i = 0u; i < 4u; ++i) qk_cx(kb, cost, qx1[i], qx0[i]);
+    qk_linf2_inplace(kb, cost, qa, 8u, plan->from_tower, NULL);
+    if (!uncomp) qk_linf2_inplace(kb, cost, qout, 8u, plan->from_tower, NULL);
+}
+
+static inline void qk_gf256_inv_tower(
+    qcc_kmb_circuit_t *kb, qir_kernel_cost_t *cost,
+    const uint32_t *qa, const uint32_t *qout, uint32_t ctrl_q,
+    const uint32_t *anc, uint32_t *next_cbit, const qir_gf256_tower_inv_plan_t *plan
+) {
+    qk_gf256_inv_tower_ex(kb, cost, qa, qout, ctrl_q, anc, next_cbit, plan, false);
+}
+
+static inline void qk_gf256_inv_tower_uncompute(
+    qcc_kmb_circuit_t *kb, qir_kernel_cost_t *cost,
+    const uint32_t *qa, const uint32_t *qout, uint32_t ctrl_q,
+    const uint32_t *anc, uint32_t *next_cbit, const qir_gf256_tower_inv_plan_t *plan
+) {
+    qk_gf256_inv_tower_ex(kb, cost, qa, qout, ctrl_q, anc, next_cbit, plan, true);
+}
+
+/* ============================================================================
  * Kernel 6: Fixed-Point Multiplier, Constant-Mul & Triangle Squarer (Compute & Uncompute)
  * ============================================================================ */
 static inline void qk_mul_fxp_ex(
@@ -2536,6 +2928,7 @@ static inline void qk_phase_dot_gf2m(
     uint16_t deg,
     uint32_t irred_poly,
     const qir_gf12_rank42_t *r42,
+    const qir_gf256_rank27_t *r27,
     const qir_gf64_rank15_t *r15,
     uint32_t *next_cbit
 ) {
@@ -2562,6 +2955,32 @@ static inline void qk_phase_dot_gf2m(
                 if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
             }
             for (uint32_t i = 11u; i > piv_a; --i) {
+                if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+            }
+        }
+        return;
+    }
+    if (deg == 8u && r27) {
+        for (uint32_t p = 0u; p < QIR_GF256_RANK; ++p) {
+            uint8_t lm = r27->l_mask[p], rm = r27->r_mask[p], wm = r27->w_mask[p];
+            if (!lm || !rm || !wm) continue;
+            qk_bit_store0(kb, cost, pbit);
+            for (uint32_t k = 0u; k < 8u; ++k) {
+                if ((wm >> k) & 1u) qk_bit_invert_if(kb, cost, pbit, qk__q(c_b, k));
+            }
+            uint32_t piv_a = (uint32_t)__builtin_ctz((unsigned)lm);
+            uint32_t piv_b = (uint32_t)__builtin_ctz((unsigned)rm);
+            for (uint32_t i = piv_a + 1u; i < 8u; ++i) {
+                if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+            }
+            for (uint32_t j = piv_b + 1u; j < 8u; ++j) {
+                if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+            }
+            qk_cz_if(kb, cost, qk__q(qa, piv_a), qk__q(qb, piv_b), pbit);
+            for (uint32_t j = 7u; j > piv_b; --j) {
+                if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+            }
+            for (uint32_t i = 7u; i > piv_a; --i) {
                 if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
             }
         }

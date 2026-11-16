@@ -68,10 +68,19 @@ typedef struct {
 
     /* Cached algebraic tower plans (shared across GF ops) */
     bool                       has_gf12_r42;
+    uint32_t                   gf12_r42_poly;
     qir_gf12_rank42_t          gf12_r42;
     bool                       has_gf12_tower;
+    uint32_t                   gf12_tower_poly;
     qir_gf12_tower_inv_plan_t  gf12_tower;
+    bool                       has_gf256_r27;
+    uint32_t                   gf256_r27_poly;
+    qir_gf256_rank27_t         gf256_r27;
+    bool                       has_gf256_tower;
+    uint32_t                   gf256_tower_poly;
+    qir_gf256_tower_inv_plan_t gf256_tower;
     bool                       has_gf64_r15;
+    uint32_t                   gf64_r15_poly;
     qir_gf64_rank15_t          gf64_r15;
 
     /* Hard-verified physical resource certificates (Zero-Discrepancy Invariant) */
@@ -624,9 +633,11 @@ static inline bool qir_codegen_or_count(
                     } else if (dop->kind == QIR_OP_GF2M_MUL) {
                         const uint32_t *da_q = plan->val_allocs[dop->ins[0]].qubits;
                         const uint32_t *db_q = plan->val_allocs[dop->ins[1]].qubits;
-                        if (dop->u.gf2m.m == 12u && plan->has_gf12_r42) {
+                        if (dop->u.gf2m.m == 12u && plan->has_gf12_r42 && plan->gf12_r42_poly == dop->u.gf2m.irred_poly) {
                             qk_gf12_mul_r42_compute(kb_or_null, &kc, da_q, db_q, out_q, st->temp_anc[0], &cbit, &plan->gf12_r42);
-                        } else if (dop->u.gf2m.m == 6u && plan->has_gf64_r15) {
+                        } else if (dop->u.gf2m.m == 8u && plan->has_gf256_r27 && plan->gf256_r27_poly == dop->u.gf2m.irred_poly) {
+                            qk_gf256_mul_r27_compute(kb_or_null, &kc, da_q, db_q, out_q, st->temp_anc[0], &cbit, &plan->gf256_r27);
+                        } else if (dop->u.gf2m.m == 6u && plan->has_gf64_r15 && plan->gf64_r15_poly == dop->u.gf2m.irred_poly) {
                             qk_gf64_mul_r15_compute(kb_or_null, &kc, da_q, db_q, out_q, st->temp_anc[0], &cbit, &plan->gf64_r15);
                         } else {
                             uint16_t mdeg = dop->u.gf2m.m;
@@ -700,7 +711,7 @@ static inline bool qir_codegen_or_count(
                     }
                     break;
                 }
-                if (op->u.gf2m.m == 12u && plan->has_gf12_r42) {
+                if (op->u.gf2m.m == 12u && plan->has_gf12_r42 && plan->gf12_r42_poly == op->u.gf2m.irred_poly) {
                     if (!uncomp) {
                         qk_gf12_mul_r42_compute(kb_or_null, &kc, in0_q, in1_q, out_q, st->temp_anc[0], &cbit, &plan->gf12_r42);
                     } else if (st->variant == QIR_VAR_HMR_PARITY_LUT) {
@@ -708,7 +719,15 @@ static inline bool qir_codegen_or_count(
                     } else {
                         qk_gf12_mul_r42_compute(kb_or_null, &kc, in0_q, in1_q, out_q, st->temp_anc[0], &cbit, &plan->gf12_r42);
                     }
-                } else if (op->u.gf2m.m == 6u && plan->has_gf64_r15) {
+                } else if (op->u.gf2m.m == 8u && plan->has_gf256_r27 && plan->gf256_r27_poly == op->u.gf2m.irred_poly) {
+                    if (!uncomp) {
+                        qk_gf256_mul_r27_compute(kb_or_null, &kc, in0_q, in1_q, out_q, st->temp_anc[0], &cbit, &plan->gf256_r27);
+                    } else if (st->variant == QIR_VAR_HMR_PARITY_LUT) {
+                        qk_gf256_mul_r27_uncompute_hmr(kb_or_null, &kc, in0_q, in1_q, out_q, &cbit, &plan->gf256_r27);
+                    } else {
+                        qk_gf256_mul_r27_compute(kb_or_null, &kc, in0_q, in1_q, out_q, st->temp_anc[0], &cbit, &plan->gf256_r27);
+                    }
+                } else if (op->u.gf2m.m == 6u && plan->has_gf64_r15 && plan->gf64_r15_poly == op->u.gf2m.irred_poly) {
                     if (!uncomp) qk_gf64_mul_r15_compute(kb_or_null, &kc, in0_q, in1_q, out_q, st->temp_anc[0], &cbit, &plan->gf64_r15);
                     else         qk_gf64_mul_r15_uncompute_hmr(kb_or_null, &kc, in0_q, in1_q, out_q, &cbit, &plan->gf64_r15);
                 } else {
@@ -735,11 +754,18 @@ static inline bool qir_codegen_or_count(
             }
             case QIR_OP_GF2M_INV: {
                 uint32_t ctrl_q = (op->num_ins >= 2u && in1_q) ? qk__q(in1_q, 0u) : UINT32_MAX;
-                if (op->u.gf2m.m == 12u && plan->has_gf12_tower) {
+                if (op->u.gf2m.m == 12u && plan->has_gf12_tower && plan->gf12_tower_poly == op->u.gf2m.irred_poly) {
                     if (!uncomp) {
                         qk_gf12_inv_tower(kb_or_null, &kc, in0_q, out_q, ctrl_q, st->temp_anc, &cbit, &plan->gf12_tower);
                     } else {
                         qk_gf12_inv_tower_uncompute(kb_or_null, &kc, in0_q, out_q, ctrl_q, st->temp_anc, &cbit, &plan->gf12_tower);
+                    }
+                } else if (op->u.gf2m.m == 8u && st->variant == QIR_VAR_GF2M_TOWER_INV &&
+                           plan->has_gf256_tower && plan->gf256_tower_poly == op->u.gf2m.irred_poly) {
+                    if (!uncomp) {
+                        qk_gf256_inv_tower(kb_or_null, &kc, in0_q, out_q, ctrl_q, st->temp_anc, &cbit, &plan->gf256_tower);
+                    } else {
+                        qk_gf256_inv_tower_uncompute(kb_or_null, &kc, in0_q, out_q, ctrl_q, st->temp_anc, &cbit, &plan->gf256_tower);
                     }
                 } else {
                     /* Direct LUT for small field (e.g. deg <= 8) */
@@ -997,8 +1023,9 @@ static inline bool qir_codegen_or_count(
                     const uint32_t *cb = plan->val_allocs[op->ins[2]].cbits;
                     qk_phase_dot_gf2m(kb_or_null, &kc, in0_q, in1_q, cb,
                                       op->u.gf2m.m, op->u.gf2m.irred_poly,
-                                      plan->has_gf12_r42 ? &plan->gf12_r42 : NULL,
-                                      plan->has_gf64_r15 ? &plan->gf64_r15 : NULL,
+                                      (plan->has_gf12_r42 && plan->gf12_r42_poly == op->u.gf2m.irred_poly) ? &plan->gf12_r42 : NULL,
+                                      (plan->has_gf256_r27 && plan->gf256_r27_poly == op->u.gf2m.irred_poly) ? &plan->gf256_r27 : NULL,
+                                      (plan->has_gf64_r15 && plan->gf64_r15_poly == op->u.gf2m.irred_poly) ? &plan->gf64_r15 : NULL,
                                       &cbit);
                 }
                 break;
