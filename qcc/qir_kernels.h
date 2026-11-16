@@ -759,7 +759,7 @@ static inline bool qk_hmr_parity_lut_uncompute(
     uint32_t *next_cbit
 ) {
     uint32_t n_tgt = col_hi - col_lo;
-    if (n_addr < 2u || n_addr > 10u || n_tgt == 0u) return false;
+    if (n_addr < 2u || n_addr > 13u || n_tgt == 0u) return false;
     uint32_t nm = n_addr >> 1u;
     uint32_t nl = n_addr - nm;
     uint32_t m_cnt = UINT32_C(1) << nm;
@@ -782,7 +782,7 @@ static inline bool qk_hmr_parity_lut_uncompute(
     uint32_t pbit = base_b + n_tgt;
     uint32_t cb_cur = pbit + 1u;
 
-    uint32_t leaves_buf[128];
+    uint32_t leaves_buf[256];
     for (uint32_t i = 0u; i < borrow; ++i) leaves_buf[i] = qk__q(tgt, i);
     for (uint32_t i = 0u; i < extra; ++i)  leaves_buf[borrow + i] = qk__q(extra_anc, i);
 
@@ -1476,35 +1476,200 @@ static inline void qk_gf64_mul_r15_uncompute_hmr(
     if (next_cbit) *next_cbit = base + 7u;
 }
 
-/* GF(2^12) Tower Inversion via quadratic extension over GF(64):
- * Requires 13 temp ancillas (delta[6], delta_inv[6], anc_prod[1]), plus 12 clean out qubits! */
+/* GF(8) = GF(2)[beta]/(beta^3 + beta + 1) Rank-6 Bilinear Multiplier & 3-CCX Inverse */
+static inline void qk_gf8_mul_r6_compute(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    const uint32_t *qa,
+    const uint32_t *qb,
+    const uint32_t *qout,
+    uint32_t anc_prod,
+    uint32_t *next_cbit
+) {
+    if (cost && cost->temp_anc_needed < 1u) cost->temp_anc_needed = 1u;
+    if (cost && cost->scratch_bits_needed < 1u) cost->scratch_bits_needed = 1u;
+    static const uint8_t LM[6] = {1u, 2u, 4u, 3u, 5u, 6u};
+    static const uint8_t RM[6] = {1u, 2u, 4u, 3u, 5u, 6u};
+    static const uint8_t WM[6] = {7u, 5u, 1u, 2u, 4u, 3u};
+    uint32_t sb = next_cbit ? *next_cbit : 0u;
+    for (uint32_t p = 0u; p < 6u; ++p) {
+        uint8_t lm = LM[p], rm = RM[p], wm = WM[p];
+        uint32_t piv_a = (uint32_t)__builtin_ctz((unsigned)lm);
+        uint32_t piv_b = (uint32_t)__builtin_ctz((unsigned)rm);
+        for (uint32_t i = piv_a + 1u; i < 3u; ++i) {
+            if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+        }
+        for (uint32_t j = piv_b + 1u; j < 3u; ++j) {
+            if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+        }
+        qk_and_compute(kb, cost, qk__q(qa, piv_a), qk__q(qb, piv_b), anc_prod);
+        for (uint32_t k = 0u; k < 3u; ++k) {
+            if ((wm >> k) & 1u) qk_cx(kb, cost, anc_prod, qk__q(qout, k));
+        }
+        qk_and_uncompute(kb, cost, qk__q(qa, piv_a), qk__q(qb, piv_b), anc_prod, sb);
+        for (uint32_t j = 2u; j > piv_b; --j) {
+            if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+        }
+        for (uint32_t i = 2u; i > piv_a; --i) {
+            if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+        }
+    }
+    if (next_cbit) (*next_cbit)++;
+}
+
+static inline void qk_gf8_mul_r6_uncompute_hmr(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    const uint32_t *qa,
+    const uint32_t *qb,
+    const uint32_t *qout,
+    uint32_t *next_cbit
+) {
+    if (cost && cost->scratch_bits_needed < 4u) cost->scratch_bits_needed = 4u;
+    static const uint8_t LM[6] = {1u, 2u, 4u, 3u, 5u, 6u};
+    static const uint8_t RM[6] = {1u, 2u, 4u, 3u, 5u, 6u};
+    static const uint8_t WM[6] = {7u, 5u, 1u, 2u, 4u, 3u};
+    uint32_t base = next_cbit ? *next_cbit : 0u;
+    uint32_t mbits[3];
+    for (uint32_t k = 0u; k < 3u; ++k) {
+        mbits[k] = base + k;
+        qk_hmr(kb, cost, qk__q(qout, k), mbits[k]);
+    }
+    uint32_t pbit = base + 3u;
+    for (uint32_t p = 0u; p < 6u; ++p) {
+        uint8_t lm = LM[p], rm = RM[p], wm = WM[p];
+        qk_bit_store0(kb, cost, pbit);
+        for (uint32_t k = 0u; k < 3u; ++k) {
+            if ((wm >> k) & 1u) qk_bit_invert_if(kb, cost, pbit, mbits[k]);
+        }
+        uint32_t piv_a = (uint32_t)__builtin_ctz((unsigned)lm);
+        uint32_t piv_b = (uint32_t)__builtin_ctz((unsigned)rm);
+        for (uint32_t i = piv_a + 1u; i < 3u; ++i) {
+            if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+        }
+        for (uint32_t j = piv_b + 1u; j < 3u; ++j) {
+            if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+        }
+        qk_cz_if(kb, cost, qk__q(qa, piv_a), qk__q(qb, piv_b), pbit);
+        for (uint32_t j = 2u; j > piv_b; --j) {
+            if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+        }
+        for (uint32_t i = 2u; i > piv_a; --i) {
+            if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+        }
+    }
+    if (next_cbit) *next_cbit = base + 4u;
+}
+
+static inline void qk_gf8_sq_xor(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    const uint32_t *qa,
+    const uint32_t *qdst
+) {
+    qk_cx(kb, cost, qk__q(qa, 0u), qk__q(qdst, 0u));
+    qk_cx(kb, cost, qk__q(qa, 1u), qk__q(qdst, 2u));
+    qk_cx(kb, cost, qk__q(qa, 2u), qk__q(qdst, 1u));
+    qk_cx(kb, cost, qk__q(qa, 2u), qk__q(qdst, 2u));
+}
+
+static inline void qk_gf8_inv_alg_compute(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    const uint32_t *qa,
+    const uint32_t *qout,
+    uint32_t anc_prod,
+    uint32_t *next_cbit
+) {
+    if (cost && cost->temp_anc_needed < 1u) cost->temp_anc_needed = 1u;
+    if (cost && cost->scratch_bits_needed < 1u) cost->scratch_bits_needed = 1u;
+    uint32_t sb = next_cbit ? *next_cbit : 0u;
+    uint32_t a0 = qk__q(qa, 0u), a1 = qk__q(qa, 1u), a2 = qk__q(qa, 2u);
+    uint32_t y0 = qk__q(qout, 0u), y1 = qk__q(qout, 1u), y2 = qk__q(qout, 2u);
+
+    qk_and_compute(kb, cost, a1, a2, anc_prod);
+    qk_cx(kb, cost, anc_prod, y0);
+    qk_and_uncompute(kb, cost, a1, a2, anc_prod, sb);
+
+    qk_and_compute(kb, cost, a0, a1, anc_prod);
+    qk_cx(kb, cost, anc_prod, y1);
+    qk_and_uncompute(kb, cost, a0, a1, anc_prod, sb);
+
+    qk_and_compute(kb, cost, a0, a2, anc_prod);
+    qk_cx(kb, cost, anc_prod, y2);
+    qk_and_uncompute(kb, cost, a0, a2, anc_prod, sb);
+
+    qk_cx(kb, cost, a0, y0);
+    qk_cx(kb, cost, a1, y0);
+    qk_cx(kb, cost, a2, y0);
+    qk_cx(kb, cost, a2, y1);
+    qk_cx(kb, cost, a1, y2);
+    qk_cx(kb, cost, a2, y2);
+    if (next_cbit) (*next_cbit)++;
+}
+
+static inline void qk_gf8_inv_alg_uncompute_hmr(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    const uint32_t *qa,
+    const uint32_t *qout,
+    uint32_t *next_cbit
+) {
+    if (cost && cost->scratch_bits_needed < 3u) cost->scratch_bits_needed = 3u;
+    uint32_t base = next_cbit ? *next_cbit : 0u;
+    uint32_t h0 = base, h1 = base + 1u, h2 = base + 2u;
+    uint32_t a0 = qk__q(qa, 0u), a1 = qk__q(qa, 1u), a2 = qk__q(qa, 2u);
+    qk_hmr(kb, cost, qk__q(qout, 0u), h0);
+    qk_hmr(kb, cost, qk__q(qout, 1u), h1);
+    qk_hmr(kb, cost, qk__q(qout, 2u), h2);
+
+    qk_cz_if(kb, cost, a1, a2, h0);
+    qk_cz_if(kb, cost, a0, a1, h1);
+    qk_cz_if(kb, cost, a0, a2, h2);
+
+    qk_z_if(kb, cost, a0, h0);
+    qk_z_if(kb, cost, a1, h0);
+    qk_z_if(kb, cost, a1, h2);
+    qk_z_if(kb, cost, a2, h0);
+    qk_z_if(kb, cost, a2, h1);
+    qk_z_if(kb, cost, a2, h2);
+    if (next_cbit) *next_cbit = base + 3u;
+}
+
+/* GF(2^12) 3-Level Algebraic Tower Inversion: GF(((2^3)^2)^2)
+ * Uses 19 temp ancillas unconditional (66 CCX compute / 36 CCX HMR uncompute),
+ * or 22 temp ancillas when controlled (69 CCX compute / 39 CCX HMR uncompute). */
 typedef struct {
     qcc_bv256_t     to_tower[12];   /* Maps std12 -> (x0, x1) in GF(64)^2 */
     qcc_bv256_t     from_tower[12]; /* Inverse of to_tower */
-    qcc_bv256_t     nu_sq_mat[6];   /* Maps x1 -> nu * (x1^2) in GF(64) */
-    uint32_t        gf64_poly;
+    qcc_bv256_t     nu_sq_mat[6];   /* Maps x1 -> nu * (x1^2) in composite GF(64) */
+    uint32_t        gf64_poly;      /* 0 => composite GF(8)[u]/(u^2+u+1) */
     qir_gf64_rank15_t gf64_plan;
-    uint64_t        inv_lut64[64];
 } qir_gf12_tower_inv_plan_t;
 
 static inline bool qir_build_gf12_tower_inv(uint32_t poly12, qir_gf12_tower_inv_plan_t *out) {
     memset(out, 0, sizeof(*out));
-    out->gf64_poly = 0x43u; /* z^6 + z + 1 */
-    if (!qir_build_gf64_rank15(out->gf64_poly, &out->gf64_plan)) return false;
+    out->gf64_poly = 0u; /* Composite GF(8)[u]/(u^2+u+1) with GF(8)=0xB */
+    if (!qir_build_gf64_rank15(0u, &out->gf64_plan)) return false;
 
-    /* 1. Find alpha in GF(2^12) satisfying alpha^6 + alpha + 1 = 0 */
-    uint16_t alpha = 0u;
+    /* 1. Find beta in GF(2^12) with beta^3 + beta + 1 = 0, and u with u^2 + u + 1 = 0 */
+    uint16_t beta = 0u, u_elem = 0u;
     for (uint16_t cand = 2u; cand < 4096u; ++cand) {
-        uint16_t a2 = (uint16_t)qir__gf2m_mul_u32(cand, cand, 12u, poly12);
-        uint16_t a4 = (uint16_t)qir__gf2m_mul_u32(a2, a2, 12u, poly12);
-        uint16_t a6 = (uint16_t)qir__gf2m_mul_u32(a4, a2, 12u, poly12);
-        if ((a6 ^ cand ^ 1u) == 0u) { alpha = cand; break; }
+        uint16_t c2 = (uint16_t)qir__gf2m_mul_u32(cand, cand, 12u, poly12);
+        if (!u_elem && (c2 ^ cand ^ 1u) == 0u) u_elem = cand;
+        uint16_t c3 = (uint16_t)qir__gf2m_mul_u32(c2, cand, 12u, poly12);
+        if (!beta && (c3 ^ cand ^ 1u) == 0u) beta = cand;
+        if (u_elem && beta) break;
     }
-    if (!alpha) return false;
+    if (!beta || !u_elem) return false;
 
-    uint16_t gf64_basis[6];
-    gf64_basis[0] = 1u;
-    for (uint32_t i = 1u; i < 6u; ++i) gf64_basis[i] = (uint16_t)qir__gf2m_mul_u32(gf64_basis[i - 1u], alpha, 12u, poly12);
+    uint16_t beta2 = (uint16_t)qir__gf2m_mul_u32(beta, beta, 12u, poly12);
+    uint16_t gf64_basis[6] = {
+        1u, beta, beta2,
+        u_elem,
+        (uint16_t)qir__gf2m_mul_u32(u_elem, beta, 12u, poly12),
+        (uint16_t)qir__gf2m_mul_u32(u_elem, beta2, 12u, poly12)
+    };
 
     /* 2. Find gamma in GF(2^12) \ GF(64) such that gamma^2 + gamma = nu in GF(64) */
     uint16_t gamma = 0u;
@@ -1512,12 +1677,10 @@ static inline bool qir_build_gf12_tower_inv(uint32_t poly12, qir_gf12_tower_inv_
     for (uint16_t g = 2u; g < 4096u && !gamma; ++g) {
         uint16_t g2  = (uint16_t)qir__gf2m_mul_u32(g, g, 12u, poly12);
         uint16_t sum = g2 ^ g;
-        /* Check if sum is in span(gf64_basis) AND g is NOT in span(gf64_basis) */
         for (uint8_t c64 = 1u; c64 < 64u; ++c64) {
             uint16_t val = 0u;
             for (uint32_t b = 0u; b < 6u; ++b) if ((c64 >> b) & 1u) val ^= gf64_basis[b];
             if (val == sum) {
-                /* Verify g is not in GF(64) */
                 bool in_sub = false;
                 for (uint8_t d64 = 0u; d64 < 64u; ++d64) {
                     uint16_t v2 = 0u;
@@ -1562,17 +1725,14 @@ static inline bool qir_build_gf12_tower_inv(uint32_t poly12, qir_gf12_tower_inv_
         out->from_tower[r].w[0] = frow;
     }
 
-    /* nu * x1^2 in GF(64) linear rows */
+    /* nu * x1^2 in composite GF(64) linear rows */
     for (uint32_t c = 0u; c < 6u; ++c) {
         uint8_t b  = (uint8_t)(1u << c);
-        uint8_t b2 = (uint8_t)qir__gf2m_mul_u32(b, b, 6u, out->gf64_poly);
-        uint8_t v  = (uint8_t)qir__gf2m_mul_u32(nu64, b2, 6u, out->gf64_poly);
+        uint8_t b2 = (uint8_t)qir__gf2m_mul_u32(b, b, 6u, 0u);
+        uint8_t v  = (uint8_t)qir__gf2m_mul_u32(nu64, b2, 6u, 0u);
         for (uint32_t r = 0u; r < 6u; ++r) {
             if ((v >> r) & 1u) qcc_bv_set(out->nu_sq_mat[r].w, c);
         }
-    }
-    for (uint32_t a = 0u; a < 64u; ++a) {
-        out->inv_lut64[a] = qir__gf2m_inv_u32(a, 6u, out->gf64_poly);
     }
     return true;
 }
@@ -1582,77 +1742,97 @@ static inline void qk_gf12_inv_tower(
     qir_kernel_cost_t *cost,
     const uint32_t *qa,    /* [12], transformed in-place then restored cleanly */
     const uint32_t *qout,  /* [12], starts clean 0 */
-    const uint32_t *anc,   /* [13]: delta[6], delta_inv[6], anc_prod[1] */
+    uint32_t ctrl_q,       /* UINT32_MAX if unconditional, else control qubit */
+    const uint32_t *anc,   /* [19] or [22] if ctrl_q != UINT32_MAX */
     uint32_t *next_cbit,
     const qir_gf12_tower_inv_plan_t *plan
 ) {
-    if (cost && cost->temp_anc_needed < 13u) cost->temp_anc_needed = 13u;
-    if (cost && cost->scratch_bits_needed < 16u) cost->scratch_bits_needed = 16u;
+    bool has_ctrl = (ctrl_q != UINT32_MAX);
+    uint32_t need_anc = has_ctrl ? 22u : 19u;
+    if (cost && cost->temp_anc_needed < need_anc) cost->temp_anc_needed = need_anc;
+    if (cost && cost->scratch_bits_needed < 48u) cost->scratch_bits_needed = 48u;
 
     /* 1. Convert input qa into tower basis (x0 = qa[0..5], x1 = qa[6..11]) in-place */
     qk_linf2_inplace(kb, cost, qa, 12u, plan->to_tower, NULL);
 
-    /* Alias pointers via anc indices cleanly */
-    uint32_t delta[6], dinv[6], qx0[6], qx1[6], qy0[6], qy1[6];
+    uint32_t qx0[6], qx1[6], qy0[6], qy1[6];
+    uint32_t delta[6], d_norm[3], d_inv[3], dinv[6], d_inv_eff[3];
     for (uint32_t i = 0u; i < 6u; ++i) {
         qx0[i]   = qk__q(qa, i);
         qx1[i]   = qk__q(qa, 6u + i);
         qy0[i]   = qk__q(qout, i);
         qy1[i]   = qk__q(qout, 6u + i);
         delta[i] = qk__q(anc, i);
-        dinv[i]  = qk__q(anc, 6u + i);
+        dinv[i]  = qk__q(anc, 12u + i);
         qk_r(kb, cost, delta[i]);
         qk_r(kb, cost, dinv[i]);
     }
-    uint32_t anc_prod = qk__q(anc, 12u);
+    for (uint32_t i = 0u; i < 3u; ++i) {
+        d_norm[i] = qk__q(anc, 6u + i);
+        d_inv[i]  = qk__q(anc, 9u + i);
+        qk_r(kb, cost, d_norm[i]);
+        qk_r(kb, cost, d_inv[i]);
+        if (has_ctrl) {
+            d_inv_eff[i] = qk__q(anc, 19u + i);
+            qk_r(kb, cost, d_inv_eff[i]);
+        } else {
+            d_inv_eff[i] = d_inv[i];
+        }
+    }
+    uint32_t anc_prod = qk__q(anc, 18u);
 
-    /* 2. x0' = x0 ^ x1 (in-place on qx0) */
+    /* 2. x0' = x0 ^ x1; delta = x0'*x1 + x0'^2 + nu*x1^2 */
     for (uint32_t i = 0u; i < 6u; ++i) qk_cx(kb, cost, qx1[i], qx0[i]);
-
-    /* 3. delta = x0' * x1 (wait: wait! Norm is x0 * (x0 + x1) + nu*x1^2! Revert or add nu*x1^2 first, wait:
-     *    With x0' = x0 + x1 in qx0, we compute delta = x0' * x1 + ... NO: x0 * x0' = (x0'+x1)*x0'!
-     *    WAIT: delta = x0*(x0+x1) + nu*x1^2 = x0'*(x0'+x1) + nu*x1^2 = x0'^2 + x0'*x1 + nu*x1^2!
-     *    OR: compute delta = nu*x1^2 via linear XOR into delta, compute qx0 *= (x0^x1) no:
-     *    Even cleaner: undo x0 ^= x1? Wait: first do qx0 ^= qx1? No, we need x0' AND x1 at step 5:
-     *    y0 = x0' * dinv, y1 = x1 * dinv!
-     *    If we want delta = x0*(x0+x1) + nu*x1^2 using ONLY qx0 (= x0+x1) and qx1 (= x1):
-     *      x0*(x0+x1) = (x0'+x1)*x0' = qx0*qx1 + qx0^2 !!
-     *    Check that identity: (x0+x1)*x1 + (x0+x1)^2 = x0*x1 + x1^2 + x0^2 + x1^2 = x0*(x0+x1) in char 2!
-     *    YES!! And qx0^2 is purely LINEAR over F_2 (0 CCX)!! */
     qk_gf64_mul_r15_compute(kb, cost, qx0, qx1, delta, anc_prod, next_cbit, &plan->gf64_plan);
-    /* delta ^= qx0^2 (squaring in GF64) */
     for (uint32_t c = 0u; c < 6u; ++c) {
-        uint8_t sq = (uint8_t)qir__gf2m_mul_u32(1u << c, 1u << c, 6u, plan->gf64_poly);
+        uint8_t sq = (uint8_t)qir__gf2m_mul_u32(1u << c, 1u << c, 6u, 0u);
         for (uint32_t r = 0u; r < 6u; ++r) if ((sq >> r) & 1u) qk_cx(kb, cost, qx0[c], delta[r]);
     }
-    /* delta ^= nu * qx1^2 */
     qk_linf2_out_of_place(kb, cost, qx1, 6u, delta, 6u, plan->nu_sq_mat, NULL);
 
-    /* 4. dinv = inv_lut64[delta] via 6-bit QROAM (uses anc[12..] or note we can reuse anc[12] + qy0[0..4] cleanly since qy0 starts 0!) */
-    uint32_t qrom_anc[6] = {anc_prod, qy0[0], qy0[1], qy0[2], qy0[3], qy0[4]};
-    qk_lut_rom_qrom(kb, cost, plan->inv_lut64, 64u, 1u, 0u, 6u, delta, 6u, dinv, qrom_anc, next_cbit);
+    /* 3. Algebraic GF(64) inverse: delta = (d0, d1) over GF(8)[u]/(u^2+u+1) */
+    for (uint32_t i = 0u; i < 3u; ++i) qk_cx(kb, cost, delta[3u + i], delta[i]); /* d0' = d0 ^ d1 */
+    qk_gf8_mul_r6_compute(kb, cost, delta, delta + 3u, d_norm, anc_prod, next_cbit);
+    qk_gf8_sq_xor(kb, cost, delta, d_norm);
+    qk_gf8_sq_xor(kb, cost, delta + 3u, d_norm);
+    qk_gf8_inv_alg_compute(kb, cost, d_norm, d_inv, anc_prod, next_cbit);
 
-    /* 5. y0 = x0' * dinv (15 CCX), y1 = x1 * dinv (15 CCX) */
+    const uint32_t *d_use = d_inv;
+    if (has_ctrl) {
+        for (uint32_t i = 0u; i < 3u; ++i) qk_and_compute(kb, cost, ctrl_q, d_inv[i], d_inv_eff[i]);
+        d_use = d_inv_eff;
+    }
+
+    qk_gf8_mul_r6_compute(kb, cost, delta, d_use, dinv, anc_prod, next_cbit);
+    qk_gf8_mul_r6_compute(kb, cost, delta + 3u, d_use, dinv + 3u, anc_prod, next_cbit);
+
+    /* 4. y0 = x0' * dinv, y1 = x1 * dinv */
     qk_gf64_mul_r15_compute(kb, cost, qx0, dinv, qy0, anc_prod, next_cbit, &plan->gf64_plan);
     qk_gf64_mul_r15_compute(kb, cost, qx1, dinv, qy1, anc_prod, next_cbit, &plan->gf64_plan);
 
-    /* 6. Uncompute dinv cleanly via 0-CCX / 14-CCX HMR Parity-LUT! (uses clean extra ancillas? Wait: after HMR(dinv), dinv[0..5] + anc_prod gives 7 free qubits, need 16 leaves -> use 6+6=12? Wait: n_addr=6 => m=3 (8), l=3 (8) = 16 leaves! If only anc[12] free outside dinv[6], fallback to reverse QROAM using anc_prod or check if qx0 unused? No, qx0 live!) */
-    /* Reverse QROAM uncomputation of dinv is safe using ONLY `qrom_anc`? Wait: qy0 is now non-zero! So we'd need 5 extra ancillas for QROAM reverse OR reuse `temp_anc_needed`: let's make anc length >= 18 (delta[6], dinv[6], anc_prod[1], extra_lut_anc[5]) -> exact 0 extra dependency! */
-    uint32_t rev_anc[6];
-    rev_anc[0] = anc_prod;
-    for (uint32_t i = 1u; i < 6u; ++i) rev_anc[i] = qk__q(anc, 12u + i);
-    if (cost && cost->temp_anc_needed < 18u) cost->temp_anc_needed = 18u;
-    qk_lut_rom_qrom(kb, cost, plan->inv_lut64, 64u, 1u, 0u, 6u, delta, 6u, dinv, rev_anc, next_cbit);
+    /* 5. Uncompute dinv, d_inv_eff, d_inv, d_norm, delta via 0-CCX HMR duals */
+    qk_gf8_mul_r6_uncompute_hmr(kb, cost, delta + 3u, d_use, dinv + 3u, next_cbit);
+    qk_gf8_mul_r6_uncompute_hmr(kb, cost, delta, d_use, dinv, next_cbit);
+    if (has_ctrl) {
+        uint32_t sb_eff = next_cbit ? (*next_cbit)++ : 0u;
+        for (uint32_t i = 3u; i > 0u; --i) {
+            qk_and_uncompute(kb, cost, ctrl_q, d_inv[i - 1u], d_inv_eff[i - 1u], sb_eff);
+        }
+    }
+    qk_gf8_inv_alg_uncompute_hmr(kb, cost, d_norm, d_inv, next_cbit);
+    qk_gf8_sq_xor(kb, cost, delta + 3u, d_norm);
+    qk_gf8_sq_xor(kb, cost, delta, d_norm);
+    qk_gf8_mul_r6_uncompute_hmr(kb, cost, delta, delta + 3u, d_norm, next_cbit);
+    for (uint32_t i = 0u; i < 3u; ++i) qk_cx(kb, cost, delta[3u + i], delta[i]);
 
-    /* 7. Uncompute delta with ZERO CCX using linear inverse + 0-CCX HMR dual of gf64_mul_r15! */
     qk_linf2_out_of_place(kb, cost, qx1, 6u, delta, 6u, plan->nu_sq_mat, NULL);
     for (uint32_t c = 0u; c < 6u; ++c) {
-        uint8_t sq = (uint8_t)qir__gf2m_mul_u32(1u << c, 1u << c, 6u, plan->gf64_poly);
+        uint8_t sq = (uint8_t)qir__gf2m_mul_u32(1u << c, 1u << c, 6u, 0u);
         for (uint32_t r = 0u; r < 6u; ++r) if ((sq >> r) & 1u) qk_cx(kb, cost, qx0[c], delta[r]);
     }
     qk_gf64_mul_r15_uncompute_hmr(kb, cost, qx0, qx1, delta, next_cbit, &plan->gf64_plan);
 
-    /* 8. Restore x0 = x0' ^ x1, convert qa and qout back from tower to std12 */
+    /* 6. Restore x0 = x0' ^ x1 and convert qa, qout back to std12 */
     for (uint32_t i = 0u; i < 6u; ++i) qk_cx(kb, cost, qx1[i], qx0[i]);
     qk_linf2_inplace(kb, cost, qa, 12u, plan->from_tower, NULL);
     qk_linf2_inplace(kb, cost, qout, 12u, plan->from_tower, NULL);
@@ -1663,51 +1843,89 @@ static inline void qk_gf12_inv_tower_uncompute(
     qir_kernel_cost_t *cost,
     const uint32_t *qa,    /* [12], transformed in-place then restored cleanly */
     const uint32_t *qout,  /* [12], cleared back to |0>^12 */
-    const uint32_t *anc,   /* [18]: delta[6], dinv[6], anc_prod[1], extra[5] */
+    uint32_t ctrl_q,       /* UINT32_MAX if unconditional, else control qubit */
+    const uint32_t *anc,   /* [19] or [22] if ctrl_q != UINT32_MAX */
     uint32_t *next_cbit,
     const qir_gf12_tower_inv_plan_t *plan
 ) {
-    if (cost && cost->temp_anc_needed < 18u) cost->temp_anc_needed = 18u;
-    if (cost && cost->scratch_bits_needed < 16u) cost->scratch_bits_needed = 16u;
+    bool has_ctrl = (ctrl_q != UINT32_MAX);
+    uint32_t need_anc = has_ctrl ? 22u : 19u;
+    if (cost && cost->temp_anc_needed < need_anc) cost->temp_anc_needed = need_anc;
+    if (cost && cost->scratch_bits_needed < 48u) cost->scratch_bits_needed = 48u;
 
     qk_linf2_inplace(kb, cost, qa, 12u, plan->to_tower, NULL);
     qk_linf2_inplace(kb, cost, qout, 12u, plan->to_tower, NULL);
 
-    uint32_t delta[6], dinv[6], qx0[6], qx1[6], qy0[6], qy1[6], rev_anc[6];
+    uint32_t qx0[6], qx1[6], qy0[6], qy1[6];
+    uint32_t delta[6], d_norm[3], d_inv[3], dinv[6], d_inv_eff[3];
     for (uint32_t i = 0u; i < 6u; ++i) {
         qx0[i]   = qk__q(qa, i);
         qx1[i]   = qk__q(qa, 6u + i);
         qy0[i]   = qk__q(qout, i);
         qy1[i]   = qk__q(qout, 6u + i);
         delta[i] = qk__q(anc, i);
-        dinv[i]  = qk__q(anc, 6u + i);
+        dinv[i]  = qk__q(anc, 12u + i);
         qk_r(kb, cost, delta[i]);
         qk_r(kb, cost, dinv[i]);
     }
-    uint32_t anc_prod = qk__q(anc, 12u);
-    rev_anc[0] = anc_prod;
-    for (uint32_t i = 1u; i < 6u; ++i) rev_anc[i] = qk__q(anc, 12u + i);
+    for (uint32_t i = 0u; i < 3u; ++i) {
+        d_norm[i] = qk__q(anc, 6u + i);
+        d_inv[i]  = qk__q(anc, 9u + i);
+        qk_r(kb, cost, d_norm[i]);
+        qk_r(kb, cost, d_inv[i]);
+        if (has_ctrl) {
+            d_inv_eff[i] = qk__q(anc, 19u + i);
+            qk_r(kb, cost, d_inv_eff[i]);
+        } else {
+            d_inv_eff[i] = d_inv[i];
+        }
+    }
+    uint32_t anc_prod = qk__q(anc, 18u);
 
     for (uint32_t i = 0u; i < 6u; ++i) qk_cx(kb, cost, qx1[i], qx0[i]);
-
     qk_gf64_mul_r15_compute(kb, cost, qx0, qx1, delta, anc_prod, next_cbit, &plan->gf64_plan);
     for (uint32_t c = 0u; c < 6u; ++c) {
-        uint8_t sq = (uint8_t)qir__gf2m_mul_u32(1u << c, 1u << c, 6u, plan->gf64_poly);
+        uint8_t sq = (uint8_t)qir__gf2m_mul_u32(1u << c, 1u << c, 6u, 0u);
         for (uint32_t r = 0u; r < 6u; ++r) if ((sq >> r) & 1u) qk_cx(kb, cost, qx0[c], delta[r]);
     }
     qk_linf2_out_of_place(kb, cost, qx1, 6u, delta, 6u, plan->nu_sq_mat, NULL);
 
-    /* qout is live during uncompute -> use rev_anc[0..5] (anc[12..17]) for QROAM */
-    qk_lut_rom_qrom(kb, cost, plan->inv_lut64, 64u, 1u, 0u, 6u, delta, 6u, dinv, rev_anc, next_cbit);
+    for (uint32_t i = 0u; i < 3u; ++i) qk_cx(kb, cost, delta[3u + i], delta[i]);
+    qk_gf8_mul_r6_compute(kb, cost, delta, delta + 3u, d_norm, anc_prod, next_cbit);
+    qk_gf8_sq_xor(kb, cost, delta, d_norm);
+    qk_gf8_sq_xor(kb, cost, delta + 3u, d_norm);
+    qk_gf8_inv_alg_compute(kb, cost, d_norm, d_inv, anc_prod, next_cbit);
 
-    qk_gf64_mul_r15_compute(kb, cost, qx0, dinv, qy0, anc_prod, next_cbit, &plan->gf64_plan);
-    qk_gf64_mul_r15_compute(kb, cost, qx1, dinv, qy1, anc_prod, next_cbit, &plan->gf64_plan);
+    const uint32_t *d_use = d_inv;
+    if (has_ctrl) {
+        for (uint32_t i = 0u; i < 3u; ++i) qk_and_compute(kb, cost, ctrl_q, d_inv[i], d_inv_eff[i]);
+        d_use = d_inv_eff;
+    }
 
-    qk_lut_rom_qrom(kb, cost, plan->inv_lut64, 64u, 1u, 0u, 6u, delta, 6u, dinv, rev_anc, next_cbit);
+    qk_gf8_mul_r6_compute(kb, cost, delta, d_use, dinv, anc_prod, next_cbit);
+    qk_gf8_mul_r6_compute(kb, cost, delta + 3u, d_use, dinv + 3u, anc_prod, next_cbit);
+
+    /* Uncompute qout (qy0, qy1) with 0 CCX via HMR dual! */
+    qk_gf64_mul_r15_uncompute_hmr(kb, cost, qx0, dinv, qy0, next_cbit, &plan->gf64_plan);
+    qk_gf64_mul_r15_uncompute_hmr(kb, cost, qx1, dinv, qy1, next_cbit, &plan->gf64_plan);
+
+    qk_gf8_mul_r6_uncompute_hmr(kb, cost, delta + 3u, d_use, dinv + 3u, next_cbit);
+    qk_gf8_mul_r6_uncompute_hmr(kb, cost, delta, d_use, dinv, next_cbit);
+    if (has_ctrl) {
+        uint32_t sb_eff = next_cbit ? (*next_cbit)++ : 0u;
+        for (uint32_t i = 3u; i > 0u; --i) {
+            qk_and_uncompute(kb, cost, ctrl_q, d_inv[i - 1u], d_inv_eff[i - 1u], sb_eff);
+        }
+    }
+    qk_gf8_inv_alg_uncompute_hmr(kb, cost, d_norm, d_inv, next_cbit);
+    qk_gf8_sq_xor(kb, cost, delta + 3u, d_norm);
+    qk_gf8_sq_xor(kb, cost, delta, d_norm);
+    qk_gf8_mul_r6_uncompute_hmr(kb, cost, delta, delta + 3u, d_norm, next_cbit);
+    for (uint32_t i = 0u; i < 3u; ++i) qk_cx(kb, cost, delta[3u + i], delta[i]);
 
     qk_linf2_out_of_place(kb, cost, qx1, 6u, delta, 6u, plan->nu_sq_mat, NULL);
     for (uint32_t c = 0u; c < 6u; ++c) {
-        uint8_t sq = (uint8_t)qir__gf2m_mul_u32(1u << c, 1u << c, 6u, plan->gf64_poly);
+        uint8_t sq = (uint8_t)qir__gf2m_mul_u32(1u << c, 1u << c, 6u, 0u);
         for (uint32_t r = 0u; r < 6u; ++r) if ((sq >> r) & 1u) qk_cx(kb, cost, qx0[c], delta[r]);
     }
     qk_gf64_mul_r15_uncompute_hmr(kb, cost, qx0, qx1, delta, next_cbit, &plan->gf64_plan);
@@ -2040,12 +2258,22 @@ static inline void qk_hmr_meas(
 static inline void qk_bit_op(
     qcc_kmb_circuit_t *kb,
     qir_kernel_cost_t *cost,
-    uint8_t mode, /* 0 = XOR, 1 = AND, 2 = NOT */
+    uint8_t mode, /* 0 = XOR, 1 = AND, 2 = NOT, 3 = OR_REDUCE */
     const uint32_t *a_b,
     const uint32_t *b_b,
     const uint32_t *out_b,
     uint32_t w
 ) {
+    if (mode == 3u) {
+        uint32_t dst = qk__q(out_b, 0u);
+        qk_bit_store0(kb, cost, dst);
+        for (uint32_t i = 0u; i < w; ++i) {
+            qk_push_cond(kb, cost, qk__q(a_b, i));
+            qk_bit_store1(kb, cost, dst);
+            qk_pop_cond(kb, cost);
+        }
+        return;
+    }
     for (uint32_t i = 0u; i < w; ++i) {
         uint32_t dst = qk__q(out_b, i);
         uint32_t sa  = qk__q(a_b, i);
@@ -2063,6 +2291,317 @@ static inline void qk_bit_op(
         } else {
             qk_bit_store1(kb, cost, dst);
             qk_bit_invert_if(kb, cost, dst, sa);
+        }
+    }
+}
+
+/* ============================================================================
+ * Kernel 9: Bijective Barrel Shifter (SHL_VAR / SHR_VAR), EQ_ZERO & PHASE_DOT
+ * ============================================================================ */
+static inline uint32_t qk__gcd_u32(uint32_t a, uint32_t b) {
+    while (b != 0u) { uint32_t t = a % b; a = b; b = t; }
+    return a ? a : 1u;
+}
+
+static inline void qk__rot_left_cswap(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    uint32_t ctrl,
+    const uint32_t *buf,
+    uint32_t W,
+    uint32_t s,
+    bool reverse
+) {
+    if (W <= 1u) return;
+    s %= W;
+    if (s == 0u) return;
+    uint32_t g = qk__gcd_u32(s, W);
+    uint32_t L = W / g;
+    for (uint32_t c = 0u; c < g; ++c) {
+        if (!reverse) {
+            for (uint32_t t = L - 1u; t >= 1u; --t) {
+                uint32_t i0 = (c + (t - 1u) * s) % W;
+                uint32_t i1 = (c + t * s) % W;
+                qk_cswap(kb, cost, ctrl, buf[i0], buf[i1]);
+            }
+        } else {
+            for (uint32_t t = 1u; t < L; ++t) {
+                uint32_t i0 = (c + (t - 1u) * s) % W;
+                uint32_t i1 = (c + t * s) % W;
+                qk_cswap(kb, cost, ctrl, buf[i0], buf[i1]);
+            }
+        }
+    }
+}
+
+static inline void qk_shl_var(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    const uint32_t *in_q, uint32_t w_in,
+    const uint32_t *sh_q, uint32_t w_sh,
+    const uint32_t *out_q, uint32_t out_w,
+    const uint32_t *aux_q,
+    uint32_t max_shift,
+    bool uncomp
+) {
+    uint32_t W = (w_in + max_shift > out_w) ? (w_in + max_shift) : out_w;
+    if (W == 0u || W > 512u) return;
+    uint32_t buf[512];
+    for (uint32_t i = 0u; i < out_w; ++i) buf[i] = qk__q(out_q, i);
+    for (uint32_t i = out_w; i < W; ++i) buf[i] = qk__q(aux_q, i - out_w);
+
+    if (!uncomp) {
+        for (uint32_t i = 0u; i < w_in && i < W; ++i) qk_cx(kb, cost, qk__q(in_q, i), buf[i]);
+        for (uint32_t k = 0u; k < w_sh && k < 30u; ++k) {
+            uint32_t step = UINT32_C(1) << k;
+            if (step > max_shift) break;
+            if (W > 1u && (step % W) != 0u) {
+                qk__rot_left_cswap(kb, cost, qk__q(sh_q, k), buf, W, step % W, false);
+            }
+        }
+    } else {
+        for (int32_t ks = (int32_t)w_sh - 1; ks >= 0; --ks) {
+            uint32_t k = (uint32_t)ks;
+            if (k >= 30u) continue;
+            uint32_t step = UINT32_C(1) << k;
+            if (step > max_shift) continue;
+            if (W > 1u && (step % W) != 0u) {
+                qk__rot_left_cswap(kb, cost, qk__q(sh_q, k), buf, W, step % W, true);
+            }
+        }
+        for (uint32_t i = 0u; i < w_in && i < W; ++i) qk_cx(kb, cost, qk__q(in_q, i), buf[i]);
+    }
+}
+
+static inline void qk_shr_var(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    const uint32_t *in_q, uint32_t w_in,
+    const uint32_t *sh_q, uint32_t w_sh,
+    const uint32_t *out_q, uint32_t out_w,
+    const uint32_t *aux_q,
+    uint32_t max_shift,
+    bool uncomp
+) {
+    uint32_t base_w = (w_in > out_w) ? w_in : out_w;
+    uint32_t W = base_w + max_shift;
+    if (W == 0u || W > 512u) return;
+    uint32_t buf[512];
+    for (uint32_t i = 0u; i < max_shift; ++i) buf[i] = qk__q(aux_q, i);
+    for (uint32_t i = 0u; i < out_w; ++i) buf[max_shift + i] = qk__q(out_q, i);
+    for (uint32_t i = out_w; i < base_w; ++i) buf[max_shift + i] = qk__q(aux_q, max_shift + (i - out_w));
+
+    if (!uncomp) {
+        for (uint32_t i = 0u; i < w_in && (max_shift + i) < W; ++i) {
+            qk_cx(kb, cost, qk__q(in_q, i), buf[max_shift + i]);
+        }
+        for (uint32_t k = 0u; k < w_sh && k < 30u; ++k) {
+            uint32_t step = UINT32_C(1) << k;
+            if (step > max_shift) break;
+            if (W > 1u && (step % W) != 0u) {
+                uint32_t rot = (W - (step % W)) % W;
+                qk__rot_left_cswap(kb, cost, qk__q(sh_q, k), buf, W, rot, false);
+            }
+        }
+    } else {
+        for (int32_t ks = (int32_t)w_sh - 1; ks >= 0; --ks) {
+            uint32_t k = (uint32_t)ks;
+            if (k >= 30u) continue;
+            uint32_t step = UINT32_C(1) << k;
+            if (step > max_shift) continue;
+            if (W > 1u && (step % W) != 0u) {
+                uint32_t rot = (W - (step % W)) % W;
+                qk__rot_left_cswap(kb, cost, qk__q(sh_q, k), buf, W, rot, true);
+            }
+        }
+        for (uint32_t i = 0u; i < w_in && (max_shift + i) < W; ++i) {
+            qk_cx(kb, cost, qk__q(in_q, i), buf[max_shift + i]);
+        }
+    }
+}
+
+static inline void qk_eq_zero_compute(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    const uint32_t *in_q,
+    uint32_t w,
+    const uint32_t *out_q,
+    const uint32_t *anc,
+    uint32_t *next_cbit
+) {
+    uint32_t qo = qk__q(out_q, 0u);
+    if (w == 0u) { qk_x(kb, cost, qo); return; }
+    if (w == 1u) {
+        uint32_t q0 = qk__q(in_q, 0u);
+        qk_x(kb, cost, q0);
+        qk_cx(kb, cost, q0, qo);
+        qk_x(kb, cost, q0);
+        return;
+    }
+    if (w == 2u) {
+        uint32_t q0 = qk__q(in_q, 0u), q1 = qk__q(in_q, 1u);
+        qk_x(kb, cost, q0);
+        qk_x(kb, cost, q1);
+        qk_ccx(kb, cost, q0, q1, qo);
+        qk_x(kb, cost, q1);
+        qk_x(kb, cost, q0);
+        return;
+    }
+    if (cost && cost->temp_anc_needed < w - 2u) cost->temp_anc_needed = w - 2u;
+    if (cost && cost->scratch_bits_needed < 2u) cost->scratch_bits_needed = 2u;
+    uint32_t sbit = next_cbit ? *next_cbit : 0u;
+    if (next_cbit) (*next_cbit)++;
+
+    for (uint32_t i = 0u; i < w; ++i) qk_x(kb, cost, qk__q(in_q, i));
+    qk_and_compute(kb, cost, qk__q(in_q, 0u), qk__q(in_q, 1u), qk__q(anc, 0u));
+    for (uint32_t i = 2u; i + 1u < w; ++i) {
+        qk_and_compute(kb, cost, qk__q(anc, i - 2u), qk__q(in_q, i), qk__q(anc, i - 1u));
+    }
+    qk_ccx(kb, cost, qk__q(anc, w - 3u), qk__q(in_q, w - 1u), qo);
+    for (uint32_t i = w - 2u; i >= 2u; --i) {
+        qk_and_uncompute(kb, cost, qk__q(anc, i - 2u), qk__q(in_q, i), qk__q(anc, i - 1u), sbit);
+    }
+    qk_and_uncompute(kb, cost, qk__q(in_q, 0u), qk__q(in_q, 1u), qk__q(anc, 0u), sbit);
+    for (uint32_t i = w; i > 0u; --i) qk_x(kb, cost, qk__q(in_q, i - 1u));
+}
+
+static inline void qk_eq_zero_uncompute(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    const uint32_t *in_q,
+    uint32_t w,
+    const uint32_t *out_q,
+    const uint32_t *anc,
+    uint32_t *next_cbit
+) {
+    uint32_t qo = qk__q(out_q, 0u);
+    if (w == 0u) { qk_x(kb, cost, qo); return; }
+    if (w == 1u) {
+        uint32_t q0 = qk__q(in_q, 0u);
+        qk_x(kb, cost, q0);
+        qk_cx(kb, cost, q0, qo);
+        qk_x(kb, cost, q0);
+        return;
+    }
+    if (w == 2u) {
+        if (cost && cost->scratch_bits_needed < 1u) cost->scratch_bits_needed = 1u;
+        uint32_t hbit = next_cbit ? (*next_cbit)++ : 0u;
+        uint32_t q0 = qk__q(in_q, 0u), q1 = qk__q(in_q, 1u);
+        qk_x(kb, cost, q0);
+        qk_x(kb, cost, q1);
+        qk_hmr(kb, cost, qo, hbit);
+        qk_cz_if(kb, cost, q0, q1, hbit);
+        qk_x(kb, cost, q1);
+        qk_x(kb, cost, q0);
+        return;
+    }
+    if (cost && cost->temp_anc_needed < w - 2u) cost->temp_anc_needed = w - 2u;
+    if (cost && cost->scratch_bits_needed < 2u) cost->scratch_bits_needed = 2u;
+    uint32_t base = next_cbit ? *next_cbit : 0u;
+    uint32_t sbit = base, hbit = base + 1u;
+    if (next_cbit) *next_cbit = base + 2u;
+
+    for (uint32_t i = 0u; i < w; ++i) qk_x(kb, cost, qk__q(in_q, i));
+    qk_and_compute(kb, cost, qk__q(in_q, 0u), qk__q(in_q, 1u), qk__q(anc, 0u));
+    for (uint32_t i = 2u; i + 1u < w; ++i) {
+        qk_and_compute(kb, cost, qk__q(anc, i - 2u), qk__q(in_q, i), qk__q(anc, i - 1u));
+    }
+    qk_hmr(kb, cost, qo, hbit);
+    qk_cz_if(kb, cost, qk__q(anc, w - 3u), qk__q(in_q, w - 1u), hbit);
+    for (uint32_t i = w - 2u; i >= 2u; --i) {
+        qk_and_uncompute(kb, cost, qk__q(anc, i - 2u), qk__q(in_q, i), qk__q(anc, i - 1u), sbit);
+    }
+    qk_and_uncompute(kb, cost, qk__q(in_q, 0u), qk__q(in_q, 1u), qk__q(anc, 0u), sbit);
+    for (uint32_t i = w; i > 0u; --i) qk_x(kb, cost, qk__q(in_q, i - 1u));
+}
+
+static inline void qk_phase_dot(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    const uint32_t *q_in,
+    const uint32_t *c_b,
+    uint32_t w
+) {
+    for (uint32_t i = 0u; i < w; ++i) {
+        qk_z_if(kb, cost, qk__q(q_in, i), qk__q(c_b, i));
+    }
+}
+
+static inline void qk_phase_dot_gf2m(
+    qcc_kmb_circuit_t *kb,
+    qir_kernel_cost_t *cost,
+    const uint32_t *qa,
+    const uint32_t *qb,
+    const uint32_t *c_b,
+    uint16_t deg,
+    uint32_t irred_poly,
+    const qir_gf12_rank42_t *r42,
+    const qir_gf64_rank15_t *r15,
+    uint32_t *next_cbit
+) {
+    if (cost && cost->scratch_bits_needed < 1u) cost->scratch_bits_needed = 1u;
+    uint32_t pbit = next_cbit ? (*next_cbit)++ : 0u;
+    if (deg == 12u && r42) {
+        for (uint32_t p = 0u; p < QIR_GF12_RANK; ++p) {
+            uint16_t lm = r42->l_mask[p], rm = r42->r_mask[p], wm = r42->w_mask[p];
+            if (!lm || !rm || !wm) continue;
+            qk_bit_store0(kb, cost, pbit);
+            for (uint32_t k = 0u; k < 12u; ++k) {
+                if ((wm >> k) & 1u) qk_bit_invert_if(kb, cost, pbit, qk__q(c_b, k));
+            }
+            uint32_t piv_a = (uint32_t)__builtin_ctz((unsigned)lm);
+            uint32_t piv_b = (uint32_t)__builtin_ctz((unsigned)rm);
+            for (uint32_t i = piv_a + 1u; i < 12u; ++i) {
+                if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+            }
+            for (uint32_t j = piv_b + 1u; j < 12u; ++j) {
+                if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+            }
+            qk_cz_if(kb, cost, qk__q(qa, piv_a), qk__q(qb, piv_b), pbit);
+            for (uint32_t j = 11u; j > piv_b; --j) {
+                if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+            }
+            for (uint32_t i = 11u; i > piv_a; --i) {
+                if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+            }
+        }
+        return;
+    }
+    if (deg == 6u && r15) {
+        for (uint32_t p = 0u; p < QIR_GF64_RANK; ++p) {
+            uint8_t lm = r15->l_mask[p], rm = r15->r_mask[p], wm = r15->w_mask[p];
+            if (!lm || !rm || !wm) continue;
+            qk_bit_store0(kb, cost, pbit);
+            for (uint32_t k = 0u; k < 6u; ++k) {
+                if ((wm >> k) & 1u) qk_bit_invert_if(kb, cost, pbit, qk__q(c_b, k));
+            }
+            uint32_t piv_a = (uint32_t)__builtin_ctz((unsigned)lm);
+            uint32_t piv_b = (uint32_t)__builtin_ctz((unsigned)rm);
+            for (uint32_t i = piv_a + 1u; i < 6u; ++i) {
+                if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+            }
+            for (uint32_t j = piv_b + 1u; j < 6u; ++j) {
+                if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+            }
+            qk_cz_if(kb, cost, qk__q(qa, piv_a), qk__q(qb, piv_b), pbit);
+            for (uint32_t j = 5u; j > piv_b; --j) {
+                if ((rm >> j) & 1u) qk_cx(kb, cost, qk__q(qb, j), qk__q(qb, piv_b));
+            }
+            for (uint32_t i = 5u; i > piv_a; --i) {
+                if ((lm >> i) & 1u) qk_cx(kb, cost, qk__q(qa, i), qk__q(qa, piv_a));
+            }
+        }
+        return;
+    }
+    for (uint16_t j = 0u; j < deg; ++j) {
+        for (uint16_t i = 0u; i < deg; ++i) {
+            uint32_t elem = qir__gf2m_mul_u32(UINT32_C(1) << i, UINT32_C(1) << j, deg, irred_poly);
+            if (elem == 0u) continue;
+            qk_bit_store0(kb, cost, pbit);
+            for (uint16_t k = 0u; k < deg; ++k) {
+                if ((elem >> k) & 1u) qk_bit_invert_if(kb, cost, pbit, qk__q(c_b, k));
+            }
+            qk_cz_if(kb, cost, qk__q(qa, i), qk__q(qb, j), pbit);
         }
     }
 }

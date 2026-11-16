@@ -23,9 +23,10 @@ typedef struct {
     uint64_t  first_fail_state;
 } qir_verify_report_t;
 
-static inline bool qir_sim_kmb_64(
+static inline bool qir_sim_kmb_64_ex(
     const qcc_kmb_circuit_t *k,
     const uint64_t *init_qstate, /* [k->num_qubits], NULL => all 0 */
+    const uint64_t *init_bstate, /* [k->num_bits], NULL => all 0 */
     uint64_t seed,
     uint64_t *out_qstate,        /* [k->num_qubits] */
     uint64_t *out_bstate,        /* Optional [k->num_bits] */
@@ -47,7 +48,8 @@ static inline bool qir_sim_kmb_64(
         return false;
     }
 
-    if (init_qstate && nq > 0u) memcpy(qstate, init_qstate, nq * sizeof(uint64_t));
+    if (init_qstate && k->num_qubits > 0u) memcpy(qstate, init_qstate, k->num_qubits * sizeof(uint64_t));
+    if (init_bstate && k->num_bits > 0u)   memcpy(bstate, init_bstate, k->num_bits * sizeof(uint64_t));
     flow_u128 phase[64];
     memset(phase, 0, sizeof(phase));
 
@@ -163,6 +165,17 @@ static inline bool qir_sim_kmb_64(
     return true;
 }
 
+static inline bool qir_sim_kmb_64(
+    const qcc_kmb_circuit_t *k,
+    const uint64_t *init_qstate, /* [k->num_qubits], NULL => all 0 */
+    uint64_t seed,
+    uint64_t *out_qstate,        /* [k->num_qubits] */
+    uint64_t *out_bstate,        /* Optional [k->num_bits] */
+    flow_u128 out_phase[64]
+) {
+    return qir_sim_kmb_64_ex(k, init_qstate, NULL, seed, out_qstate, out_bstate, out_phase);
+}
+
 static inline bool qir_verify_kmb_vs_qir(
     const qcc_kmb_circuit_t *kmb,
     const qir_module_t *mod,
@@ -183,6 +196,7 @@ static inline bool qir_verify_kmb_vs_qir(
     uint32_t k_nq = kmb->num_qubits ? kmb->num_qubits : 1u;
     uint32_t k_nb = kmb->num_bits ? kmb->num_bits : 1u;
     uint64_t *init_q = (uint64_t *)calloc(k_nq, sizeof(uint64_t));
+    uint64_t *init_b = (uint64_t *)calloc(k_nb, sizeof(uint64_t));
     uint64_t *out_q1 = (uint64_t *)calloc(k_nq, sizeof(uint64_t));
     uint64_t *out_q2 = (uint64_t *)calloc(k_nq, sizeof(uint64_t));
     uint64_t *out_b1 = (uint64_t *)calloc(k_nb, sizeof(uint64_t));
@@ -215,6 +229,7 @@ static inline bool qir_verify_kmb_vs_qir(
 
     for (uint32_t b = 0u; b < num_batches; ++b) {
         memset(init_q, 0, k_nq * sizeof(uint64_t));
+        memset(init_b, 0, k_nb * sizeof(uint64_t));
         memset(out_q1, 0, k_nq * sizeof(uint64_t));
         memset(out_q2, 0, k_nq * sizeof(uint64_t));
         memset(out_b1, 0, k_nb * sizeof(uint64_t));
@@ -230,7 +245,16 @@ static inline bool qir_verify_kmb_vs_qir(
                     in_vecs[ii].lanes[l][ww] = rv & mask.w[ww];
                 }
             }
-            if (plan->val_allocs[vid].qubits) {
+            if (mod->vals[vid].rep == QIR_REP_CLASSICAL && plan->val_allocs[vid].cbits) {
+                for (uint16_t bit = 0u; bit < w; ++bit) {
+                    uint32_t bid = plan->val_allocs[vid].cbits[bit];
+                    uint64_t lane_word = 0u;
+                    for (uint32_t l = 0u; l < 64u; ++l) {
+                        if (qcc_bv_get(in_vecs[ii].lanes[l], bit)) lane_word |= (UINT64_C(1) << l);
+                    }
+                    if (bid < k_nb) init_b[bid] = lane_word;
+                }
+            } else if (plan->val_allocs[vid].qubits) {
                 for (uint16_t bit = 0u; bit < w; ++bit) {
                     uint32_t qid = plan->val_allocs[vid].qubits[bit];
                     uint64_t lane_word = 0u;
@@ -246,8 +270,8 @@ static inline bool qir_verify_kmb_vs_qir(
         qir_val_vec64_t *ref_vals = NULL;
         flow_u128 ref_phase[64], p1[64], p2[64];
         if (!qir_eval_64(mod, in_vecs, seed ^ (uint64_t)b, &scratch, &ref_vals, ref_phase) ||
-            !qir_sim_kmb_64(kmb, init_q, (seed + 111u) ^ (uint64_t)b, out_q1, out_b1, p1) ||
-            !qir_sim_kmb_64(kmb, init_q, (seed + 99991u) ^ (uint64_t)b, out_q2, out_b2, p2)) {
+            !qir_sim_kmb_64_ex(kmb, init_q, init_b, (seed + 111u) ^ (uint64_t)b, out_q1, out_b1, p1) ||
+            !qir_sim_kmb_64_ex(kmb, init_q, init_b, (seed + 99991u) ^ (uint64_t)b, out_q2, out_b2, p2)) {
             rep.value_mismatches++;
             break;
         }
@@ -337,6 +361,7 @@ static inline bool qir_verify_kmb_vs_qir(
     if (out_rep) *out_rep = rep;
 
     free(init_q);
+    free(init_b);
     free(out_q1);
     free(out_q2);
     free(out_b1);

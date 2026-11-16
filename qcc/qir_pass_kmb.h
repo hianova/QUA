@@ -6,7 +6,7 @@
 #ifndef QIR_PASS_KMB_H
 #define QIR_PASS_KMB_H
 
-#include "qir_codegen.h"
+#include "qir_opt.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -375,6 +375,7 @@ static inline bool qir_pass_kmb_optimize_with_plan(
     uint32_t *q_remap = (uint32_t *)calloc(old_nq, sizeof(uint32_t));
     for (uint32_t r = 0u; r < c->num_regs; ++r) {
         const qcc_kmb_reg_t *reg = &c->regs[r];
+        if (strcmp(reg->name, "@clean") == 0) continue;
         if (reg->len > 0u && ((reg->targets[0] & UINT32_C(0x80000000)) != 0u)) {
             for (uint32_t k = 0u; k < reg->len; ++k) {
                 uint32_t qid = reg->targets[k] & UINT32_C(0x7FFFFFFF);
@@ -420,6 +421,17 @@ static inline bool qir_pass_kmb_optimize_with_plan(
     for (uint32_t r = 0u; r < c->num_regs; ++r) {
         const qcc_kmb_reg_t *reg = &c->regs[r];
         bool is_q = (reg->len > 0u) && ((reg->targets[0] & UINT32_C(0x80000000)) != 0u);
+        if (is_q && strcmp(reg->name, "@clean") == 0) {
+            uint32_t *ids = reg->len ? (uint32_t *)malloc(reg->len * sizeof(uint32_t)) : NULL;
+            uint32_t kept = 0u;
+            for (uint32_t k = 0u; k < reg->len; ++k) {
+                uint32_t tid = reg->targets[k] & UINT32_C(0x7FFFFFFF);
+                if (tid < old_nq && q_used[tid]) ids[kept++] = q_remap[tid];
+            }
+            if (kept > 0u) qcc_kmb_add_quantum_reg(&next_c, reg->name, ids, kept);
+            free(ids);
+            continue;
+        }
         uint32_t *ids = reg->len ? (uint32_t *)malloc(reg->len * sizeof(uint32_t)) : NULL;
         for (uint32_t k = 0u; k < reg->len; ++k) {
             uint32_t tid = reg->targets[k] & UINT32_C(0x7FFFFFFF);
@@ -453,6 +465,54 @@ static inline bool qir_pass_kmb_optimize_with_plan(
 
 static inline bool qir_pass_kmb_optimize(qcc_kmb_circuit_t *c, qir_kmb_pass_stats_t *out_stats) {
     return qir_pass_kmb_optimize_with_plan(c, NULL, out_stats);
+}
+
+/* Unified High-Level QIR -> Optimized Kickmix v2 Pipeline */
+static inline bool qcc_compile_module_to_kmb(
+    qir_module_t *mod,
+    qcc_arena_t *arena,
+    const qcc_opt_cfg_t *cfg,
+    qcc_kmb_circuit_t *out_kmb,
+    qir_phys_plan_t *out_plan_opt
+) {
+    if (!mod || !arena || !out_kmb) return false;
+    qir_recompute_zero_masks(mod);
+    qcc_opt_cfg_t eff_cfg = cfg ? *cfg : qcc_opt_cfg_default();
+    qir_phys_plan_t local_plan;
+    qir_phys_plan_t *plan = out_plan_opt ? out_plan_opt : &local_plan;
+    if (!qir_optimize_module(mod, arena, &eff_cfg, NULL, plan)) return false;
+    if (!qir_codegen_emit(plan, out_kmb)) {
+        if (!out_plan_opt) qir_phys_plan_free(plan);
+        return false;
+    }
+    if (!qir_pass_kmb_optimize_with_plan(out_kmb, plan, NULL)) {
+        qcc_kmb_free(out_kmb);
+        if (!out_plan_opt) qir_phys_plan_free(plan);
+        return false;
+    }
+    if (!out_plan_opt) qir_phys_plan_free(plan);
+    return true;
+}
+
+static inline bool qcc_compile_module_to_file(
+    qir_module_t *mod,
+    qcc_arena_t *arena,
+    const qcc_opt_cfg_t *cfg,
+    const char *kmb_path,
+    qcc_kmb_stats_t *out_stats_opt
+) {
+    if (!mod || !arena || !kmb_path) return false;
+    qcc_kmb_circuit_t kmb;
+    if (!qcc_compile_module_to_kmb(mod, arena, cfg, &kmb, NULL)) return false;
+    if (out_stats_opt) {
+        if (!qcc_kmb_recompute_stats(&kmb, out_stats_opt)) {
+            qcc_kmb_free(&kmb);
+            return false;
+        }
+    }
+    int wr = qcc_kmb_write(&kmb, kmb_path);
+    qcc_kmb_free(&kmb);
+    return (wr == 0);
 }
 
 #ifdef __cplusplus

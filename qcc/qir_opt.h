@@ -20,9 +20,10 @@ typedef struct {
     uint32_t        searu_iters;      /* Max SEARU iterations (0 => default 256) */
     uint32_t        flow_iters;       /* Max FLOW 2-Jet relaxation steps (0 => default 16) */
     uint64_t        seed;
-    uint32_t        enabled_rules;    /* Bitmask bit r (1..9) => Rule Rr enabled (0x3FF = all R1..R9) */
+    uint32_t        enabled_rules;    /* Bitmask bit r (1..15) => Rule Rr enabled (0xFFFF = all) */
     bool            aggressive_uncompute;
     bool            require_clean_scratch;
+    bool            emit_clean_reg;   /* Declare non-IO clean qubits under "@clean" register */
 } qcc_opt_cfg_t;
 
 static inline qcc_opt_cfg_t qcc_opt_cfg_default(void) {
@@ -32,9 +33,10 @@ static inline qcc_opt_cfg_t qcc_opt_cfg_default(void) {
     cfg.searu_iters           = 256u;
     cfg.flow_iters            = 16u;
     cfg.seed                  = UINT64_C(0x51C0FFEE77771234);
-    cfg.enabled_rules         = 0x3FFu;
+    cfg.enabled_rules         = 0xFFFFu;
     cfg.aggressive_uncompute  = true;
     cfg.require_clean_scratch = false;
+    cfg.emit_clean_reg        = false;
     return cfg;
 }
 
@@ -56,11 +58,76 @@ static inline bool qir__op_supports_uncompute(const qir_op_t *op, bool inplace) 
         case QIR_OP_LUT_ROM:
         case QIR_OP_CLZ_NORM:
         case QIR_OP_CTRL_SEL:
+        case QIR_OP_SHL_VAR:
+        case QIR_OP_SHR_VAR:
+        case QIR_OP_EQ_ZERO:
             return true;
         case QIR_OP_LINF2:
             return !inplace;
         default:
             return false;
+    }
+}
+
+static inline void qir__query_lut_res(
+    const qir_lut_payload_t *lut,
+    uint16_t vb,
+    qir_variant_kind_t var,
+    uint32_t aux_param,
+    const qir_gauge_lut_t *gauge_lut,
+    bool uncomp,
+    uint32_t *out_temp_anc,
+    uint32_t *out_cbits
+) {
+    if (uncomp && var == QIR_VAR_HMR_PARITY_LUT && lut->key_bits >= 2u && lut->key_bits <= 13u) {
+        uint32_t nm = lut->key_bits >> 1u;
+        uint32_t nl = lut->key_bits - nm;
+        uint32_t leaves = (UINT32_C(1) << nm) + (UINT32_C(1) << nl);
+        uint32_t borrow = vb < leaves ? vb : leaves;
+        *out_temp_anc = leaves - borrow;
+        *out_cbits    = vb + leaves + 2u;
+    } else if (var == QIR_VAR_QROAM_VSLOT0) {
+        qk_qroam_vslot0_resources(lut->table, lut->num_entries, lut->val_words, 0u, vb,
+                                  lut->key_bits, aux_param ? aux_param : 1u,
+                                  out_temp_anc, out_cbits);
+    } else if (var == QIR_VAR_QROAM_SPLIT) {
+        uint32_t K = aux_param & 0xFFu;
+        uint32_t b_sh = (aux_param >> 8u) & 0xFFu;
+        if (K < 2u) K = 2u;
+        if (b_sh == 0u) b_sh = 1u;
+        uint32_t chunk = (vb + K - 1u) / K;
+        if (chunk == 0u) chunk = 1u;
+        uint32_t mx_anc = 0u, sum_cb = 0u;
+        for (uint32_t lo = 0u; lo < vb; lo += chunk) {
+            uint32_t hi = (lo + chunk < vb) ? (lo + chunk) : vb;
+            uint32_t ca = 0u, cc = 0u;
+            qk_qroam_vslot0_resources(lut->table, lut->num_entries, lut->val_words, lo, hi,
+                                      lut->key_bits, b_sh, &ca, &cc);
+            if (ca > mx_anc) mx_anc = ca;
+            sum_cb += cc;
+        }
+        *out_temp_anc = mx_anc;
+        *out_cbits    = sum_cb;
+    } else if (var == QIR_VAR_LIN_GAUGE_TSP && gauge_lut) {
+        uint32_t rb = gauge_lut->rank_bits;
+        uint32_t extra = lut->key_bits;
+        if (lut->key_bits >= 2u && lut->key_bits <= 13u) {
+            uint32_t nm = lut->key_bits >> 1u;
+            uint32_t nl = lut->key_bits - nm;
+            uint32_t leaves = (UINT32_C(1) << nm) + (UINT32_C(1) << nl);
+            uint32_t borrow = rb < leaves ? rb : leaves;
+            if (leaves - borrow > extra) extra = leaves - borrow;
+        }
+        uint32_t cb1 = (lut->key_bits < 16u) ? (UINT32_C(1) << lut->key_bits) : 4096u;
+        *out_temp_anc = rb + extra;
+        *out_cbits    = cb1 + 64u;
+    } else if (var == QIR_VAR_LUT_COL_SPLIT && aux_param >= 2u) {
+        uint32_t cb1 = (lut->key_bits < 16u) ? (UINT32_C(1) << lut->key_bits) : 4096u;
+        *out_temp_anc = lut->key_bits;
+        *out_cbits    = aux_param * cb1;
+    } else {
+        *out_temp_anc = lut->key_bits;
+        *out_cbits    = (lut->key_bits < 16u) ? (UINT32_C(1) << lut->key_bits) : 4096u;
     }
 }
 
@@ -133,7 +200,24 @@ static inline void qir__query_step_temp(
             *out_cbits      = wa + 4u;
             break;
         }
+        case QIR_OP_GF2M_ADD:
+            if (st->variant == QIR_VAR_XOR_ACCUM && st->num_chain_ops > 0u) {
+                const qir_op_t *dop = &m->ops[st->chain_ops[0]];
+                qir_variant_kind_t sub_var = (qir_variant_kind_t)((st->aux_param >> 8u) & 0xFFu);
+                uint32_t sub_aux = st->aux_param >> 16u;
+                if (dop->kind == QIR_OP_LUT_ROM) {
+                    qir__query_lut_res(&dop->u.lut, dop->u.lut.val_bits, sub_var, sub_aux, st->gauge_lut, false,
+                                       out_temp_anc, out_cbits);
+                } else if (dop->kind == QIR_OP_GF2M_MUL) {
+                    *out_temp_anc = 1u;
+                    *out_cbits    = (dop->u.gf2m.m == 12u || dop->u.gf2m.m == 6u) ? 4u : (uint32_t)dop->u.gf2m.m * dop->u.gf2m.m;
+                }
+            }
+            break;
         case QIR_OP_GF2M_MUL:
+            if (st->variant == QIR_VAR_GF2M_CONST_LINF2) {
+                break;
+            }
             *out_temp_anc = 1u;
             *out_cbits    = (uncomp && (op->u.gf2m.m == 12u || op->u.gf2m.m == 6u))
                 ? (op->u.gf2m.m + 1u)
@@ -141,8 +225,11 @@ static inline void qir__query_step_temp(
             break;
         case QIR_OP_GF2M_INV:
             if (op->u.gf2m.m == 12u) {
-                *out_temp_anc = 18u;
-                *out_cbits    = 192u;
+                *out_temp_anc = (op->num_ins >= 2u) ? 22u : 19u;
+                *out_cbits    = 48u;
+            } else if (op->num_ins >= 2u) {
+                *out_temp_anc = 2u * op->u.gf2m.m;
+                *out_cbits    = (UINT32_C(1) << op->u.gf2m.m) * 2u;
             } else {
                 *out_temp_anc = op->u.gf2m.m;
                 *out_cbits    = UINT32_C(1) << op->u.gf2m.m;
@@ -154,40 +241,18 @@ static inline void qir__query_step_temp(
             if ((op->flags & QIR_FLAG_APPROX) && st->approx_keep_bits > 0u && st->approx_keep_bits < vb) {
                 vb = st->approx_keep_bits;
             }
-            if (uncomp && st->variant == QIR_VAR_HMR_PARITY_LUT && lut->key_bits >= 2u && lut->key_bits <= 10u) {
-                uint32_t nm = lut->key_bits >> 1u;
-                uint32_t nl = lut->key_bits - nm;
-                uint32_t leaves = (UINT32_C(1) << nm) + (UINT32_C(1) << nl);
-                uint32_t borrow = vb < leaves ? vb : leaves;
-                *out_temp_anc = leaves - borrow;
-                *out_cbits    = vb + leaves + 2u;
-            } else if (st->variant == QIR_VAR_QROAM_VSLOT0) {
-                qk_qroam_vslot0_resources(lut->table, lut->num_entries, lut->val_words, 0u, vb,
-                                          lut->key_bits, st->aux_param ? st->aux_param : 1u,
-                                          out_temp_anc, out_cbits);
-            } else if (st->variant == QIR_VAR_LIN_GAUGE_TSP && st->gauge_lut) {
-                uint32_t rb = st->gauge_lut->rank_bits;
-                uint32_t extra = lut->key_bits;
-                if (lut->key_bits >= 2u && lut->key_bits <= 10u) {
-                    uint32_t nm = lut->key_bits >> 1u;
-                    uint32_t nl = lut->key_bits - nm;
-                    uint32_t leaves = (UINT32_C(1) << nm) + (UINT32_C(1) << nl);
-                    uint32_t borrow = rb < leaves ? rb : leaves;
-                    if (leaves - borrow > extra) extra = leaves - borrow;
-                }
-                uint32_t cb1 = (lut->key_bits < 16u) ? (UINT32_C(1) << lut->key_bits) : 4096u;
-                *out_temp_anc = rb + extra;
-                *out_cbits    = cb1 + 64u;
-            } else if (st->variant == QIR_VAR_LUT_COL_SPLIT && st->aux_param >= 2u) {
-                uint32_t cb1 = (lut->key_bits < 16u) ? (UINT32_C(1) << lut->key_bits) : 4096u;
-                *out_temp_anc = lut->key_bits;
-                *out_cbits    = st->aux_param * cb1;
-            } else {
-                *out_temp_anc = lut->key_bits;
-                *out_cbits    = (lut->key_bits < 16u) ? (UINT32_C(1) << lut->key_bits) : 4096u;
-            }
+            qir__query_lut_res(lut, vb, st->variant, st->aux_param, st->gauge_lut, uncomp, out_temp_anc, out_cbits);
             break;
         }
+        case QIR_OP_CTRL_SEL:
+            if (st->variant == QIR_VAR_CTRL_ADD_CUCCARO && st->num_chain_ops > 0u) {
+                uint32_t lhs_vid = st->aux_param & UINT32_C(0x7FFFFFFF);
+                uint16_t k_in = m->vals[lhs_vid].width;
+                uint32_t k = (k_in < out_w) ? k_in : out_w;
+                *out_temp_anc = (k == 1u) ? ((out_w == 1u) ? 0u : out_w - 1u) : ((k == out_w) ? 1u : (out_w - k));
+                *out_cbits    = 2u;
+            }
+            break;
         case QIR_OP_CLZ_NORM: {
             uint16_t iw = m->vals[op->ins[0]].width;
             uint16_t cw = m->vals[op->outs[1]].width;
@@ -195,6 +260,29 @@ static inline void qir__query_step_temp(
             *out_cbits    = 6u * iw;
             break;
         }
+        case QIR_OP_SHL_VAR: {
+            uint16_t w_in = (op->num_ins > 0u) ? m->vals[op->ins[0]].width : 0u;
+            uint32_t W = ((uint32_t)w_in + op->u.shift.max_shift > out_w)
+                ? ((uint32_t)w_in + op->u.shift.max_shift) : out_w;
+            *out_aux_qubits = (!uncomp && W > out_w) ? (W - out_w) : 0u;
+            break;
+        }
+        case QIR_OP_SHR_VAR: {
+            uint16_t w_in = (op->num_ins > 0u) ? m->vals[op->ins[0]].width : 0u;
+            uint32_t base_w = (w_in > out_w) ? w_in : out_w;
+            uint32_t W = base_w + op->u.shift.max_shift;
+            *out_aux_qubits = (!uncomp && W > out_w) ? (W - out_w) : 0u;
+            break;
+        }
+        case QIR_OP_EQ_ZERO: {
+            uint16_t iw = (op->num_ins > 0u) ? m->vals[op->ins[0]].width : 0u;
+            *out_temp_anc = (iw >= 3u) ? (uint32_t)(iw - 2u) : 0u;
+            *out_cbits    = 2u;
+            break;
+        }
+        case QIR_OP_PHASE_DOT:
+            *out_cbits = (op->num_ins >= 3u) ? 2u : 0u;
+            break;
         case QIR_OP_PHASE_POLY: {
             uint16_t max_deg = 0u;
             for (uint32_t t = 0u; t < op->u.phase_poly.num_terms; ++t) {
@@ -219,8 +307,8 @@ static inline void qir__query_step_temp(
     }
 }
 
-/* Dynamic Qubit Pool Bitset (up to 4096 qubits cleanly) */
-#define QIR_POOL_WORDS 64u
+/* Dynamic Qubit Pool Bitset (up to 8192 qubits cleanly) */
+#define QIR_POOL_WORDS 128u
 typedef struct {
     uint64_t dirty[QIR_POOL_WORDS];     /* Bit q=1 => currently allocated live / non-zero */
     uint64_t dirty_perm[QIR_POOL_WORDS];/* Bit q=1 => permanently dirty tail (never borrowable) */
@@ -237,11 +325,11 @@ static inline uint32_t qir__pool_alloc_clean(qir__qpool_t *p, uint32_t *out_peak
             return q;
         }
     }
-    return 4095u;
+    return 8191u;
 }
 
 static inline void qir__pool_free_clean(qir__qpool_t *p, uint32_t q) {
-    if (q < 4096u) p->dirty[q >> 6u] &= ~(UINT64_C(1) << (q & 63u));
+    if (q < 8192u) p->dirty[q >> 6u] &= ~(UINT64_C(1) << (q & 63u));
 }
 
 static inline uint16_t qir__collect_op_inputs(
@@ -289,6 +377,16 @@ static inline uint16_t qir__collect_op_inputs(
         }
     } else if (en && en->variant == QIR_VAR_MUL_CONST_ADD && op->num_ins >= 2u) {
         out_ins[n++] = op->ins[(en->aux_param & 1u) ^ 1u];
+    } else if (en && en->variant == QIR_VAR_GF2M_CONST_LINF2 && op->num_ins >= 2u) {
+        out_ins[n++] = op->ins[en->aux_param & 1u];
+    } else if (en && en->variant == QIR_VAR_CTRL_ADD_CUCCARO && op->num_ins >= 3u) {
+        out_ins[n++] = op->ins[0];
+        out_ins[n++] = op->ins[1];
+        out_ins[n++] = en->aux_param & UINT32_C(0x7FFFFFFF);
+    } else if (en && en->variant == QIR_VAR_XOR_ACCUM && en->num_chain_ops > 0u && op->num_ins >= 2u) {
+        out_ins[n++] = op->ins[en->aux_param & 3u];
+        const qir_op_t *dop = &m->ops[en->chain_ops[0]];
+        for (uint16_t i = 0u; i < dop->num_ins && n < 32u; ++i) out_ins[n++] = dop->ins[i];
     } else {
         for (uint16_t i = 0u; i < op->num_ins && n < 32u; ++i) out_ins[n++] = op->ins[i];
     }
@@ -299,8 +397,268 @@ static inline uint16_t qir__collect_op_inputs(
 }
 
 static inline bool qir__pool_is_busy(const qir__qpool_t *p, uint32_t q) {
-    if (q >= 4096u) return true;
+    if (q >= 8192u) return true;
     return (((p->dirty[q >> 6u] | p->dirty_perm[q >> 6u]) >> (q & 63u)) & 1u) != 0u;
+}
+
+static inline bool qir__can_exec_inplace(
+    const qir_module_t *m,
+    const qir_phys_plan_t *plan,
+    const uint8_t *op_skip,
+    const uint8_t *will_alias,
+    const uint8_t *is_in,
+    const uint8_t *is_pinned_out,
+    const uint8_t *is_direct_out,
+    const uint32_t *fwd_refs,
+    const uint32_t *uncomp_pin,
+    const uint32_t *back_vals,
+    const uint16_t *back_cnt,
+    const qir_op_t *op,
+    uint32_t src_v,
+    const uint32_t *other_vals,
+    uint32_t n_others,
+    bool eff_clean
+) {
+    if (op->num_outs == 0u || src_v >= m->num_vals) return false;
+    uint32_t dst = op->outs[0];
+    if (m->vals[src_v].rep != QIR_REP_STD || m->vals[dst].rep != QIR_REP_STD) return false;
+    uint16_t w = m->vals[dst].width;
+    if (w == 0u || m->vals[src_v].width != w) return false;
+
+    const qir_val_alloc_t *sva = &plan->val_allocs[src_v];
+    if (!sva->qubits) return false;
+    for (uint16_t a = 0u; a < w; ++a) {
+        for (uint16_t b = a + 1u; b < w; ++b) {
+            if (sva->qubits[a] == sva->qubits[b]) return false;
+        }
+    }
+    for (uint32_t oi = 0u; oi < n_others; ++oi) {
+        uint32_t ov = other_vals[oi];
+        if (ov == src_v || ov >= m->num_vals) continue;
+        const qir_val_alloc_t *ova = &plan->val_allocs[ov];
+        if (!ova->qubits) continue;
+        for (uint16_t a = 0u; a < w; ++a) {
+            for (uint16_t b = 0u; b < ova->width; ++b) {
+                if (sva->qubits[a] == ova->qubits[b]) return false;
+            }
+        }
+    }
+    if (back_cnt[src_v] == 0u) return false;
+    for (uint16_t bi = 0u; bi < back_cnt[src_v]; ++bi) {
+        uint32_t bv = back_vals[(size_t)src_v * 64u + bi];
+        if (fwd_refs[bv] != 1u || uncomp_pin[bv] != 0u || is_pinned_out[bv]) return false;
+    }
+
+    if (!eff_clean) {
+        if (sva->is_alias || will_alias[src_v]) return false;
+        uint32_t bv = src_v;
+        return (is_in[bv] || (m->vals[bv].def_op != UINT32_MAX &&
+                              !qir__op_supports_uncompute(&m->ops[m->vals[bv].def_op], false)));
+    }
+
+    for (uint16_t bi = 0u; bi < back_cnt[src_v]; ++bi) {
+        uint32_t bv = back_vals[(size_t)src_v * 64u + bi];
+        if (!is_in[bv]) return false;
+    }
+
+    /* Map every bit of src_v to its module input register (vid, bit) */
+    uint32_t *bit_in_vid = (uint32_t *)malloc((size_t)w * sizeof(uint32_t));
+    uint16_t *bit_in_pos = (uint16_t *)malloc((size_t)w * sizeof(uint16_t));
+    for (uint16_t b = 0u; b < w; ++b) {
+        bit_in_vid[b] = UINT32_MAX;
+        for (uint32_t ii = 0u; ii < m->num_inputs; ++ii) {
+            uint32_t iv = m->inputs[ii];
+            const qir_val_alloc_t *iva = &plan->val_allocs[iv];
+            if (!iva->qubits) continue;
+            for (uint16_t k = 0u; k < iva->width; ++k) {
+                if (iva->qubits[k] == sva->qubits[b]) {
+                    bit_in_vid[b] = iv;
+                    bit_in_pos[b] = k;
+                    break;
+                }
+            }
+            if (bit_in_vid[b] != UINT32_MAX) break;
+        }
+        if (bit_in_vid[b] == UINT32_MAX) {
+            free(bit_in_vid); free(bit_in_pos);
+            return false;
+        }
+    }
+
+    bool ok = false;
+    if (is_direct_out[dst] && back_cnt[src_v] == 1u && is_in[src_v]) {
+        const char *dn = m->vals[dst].name;
+        const char *sn = m->vals[src_v].name;
+        bool has_cons = false;
+        for (uint32_t ci = op->id + 1u; ci < m->num_ops && !has_cons; ++ci) {
+            if (op_skip[ci]) continue;
+            for (uint16_t ii = 0u; ii < m->ops[ci].num_ins; ++ii) {
+                if (m->ops[ci].ins[ii] == dst) { has_cons = true; break; }
+            }
+        }
+        if (!has_cons && dn && sn && strcmp(dn, sn) == 0) ok = true;
+    } else if (!is_direct_out[dst]) {
+        uint8_t *cov = (uint8_t *)calloc(w, 1u);
+        ok = true;
+        for (uint32_t ci = op->id + 1u; ci < m->num_ops && ok; ++ci) {
+            if (op_skip[ci]) continue;
+            const qir_op_t *cop = &m->ops[ci];
+            bool uses_dst = false;
+            for (uint16_t ii = 0u; ii < cop->num_ins; ++ii) {
+                if (cop->ins[ii] == dst) { uses_dst = true; break; }
+            }
+            if (!uses_dst) continue;
+            if (cop->kind != QIR_OP_SLICE || cop->num_outs == 0u ||
+                !will_alias[cop->outs[0]] || !is_direct_out[cop->outs[0]]) {
+                ok = false; break;
+            }
+            uint32_t so = cop->outs[0];
+            uint16_t lo = cop->u.slice.lo, sw = m->vals[so].width;
+            const char *onm = m->vals[so].name;
+            if (lo + sw > w || !onm) { ok = false; break; }
+            for (uint16_t sb = 0u; sb < sw; ++sb) {
+                uint32_t iv = bit_in_vid[lo + sb];
+                const char *inm = m->vals[iv].name;
+                if (cov[lo + sb] != 0u || bit_in_pos[lo + sb] != sb ||
+                    m->vals[iv].width != sw || !inm || strcmp(onm, inm) != 0) {
+                    ok = false; break;
+                }
+                cov[lo + sb] = 1u;
+            }
+        }
+        for (uint16_t b = 0u; b < w && ok; ++b) {
+            if (cov[b] == 0u) ok = false;
+        }
+        free(cov);
+    }
+    free(bit_in_vid);
+    free(bit_in_pos);
+    return ok;
+}
+
+static inline void qir__heap_push(uint32_t *heap, uint32_t *len, uint8_t *in_ready, uint32_t val) {
+    if (in_ready[val]) return;
+    in_ready[val] = 1u;
+    uint32_t i = (*len)++;
+    heap[i] = val;
+    while (i > 0u) {
+        uint32_t p = (i - 1u) >> 1u;
+        if (heap[p] >= heap[i]) break;
+        uint32_t t = heap[p]; heap[p] = heap[i]; heap[i] = t;
+        i = p;
+    }
+}
+
+static inline uint32_t qir__heap_pop(uint32_t *heap, uint32_t *len, uint8_t *in_ready) {
+    uint32_t top = heap[0];
+    in_ready[top] = 0u;
+    uint32_t n = --(*len);
+    if (n > 0u) {
+        heap[0] = heap[n];
+        uint32_t i = 0u;
+        for (;;) {
+            uint32_t l = 2u * i + 1u, r = l + 1u, best = i;
+            if (l < n && heap[l] > heap[best]) best = l;
+            if (r < n && heap[r] > heap[best]) best = r;
+            if (best == i) break;
+            uint32_t t = heap[i]; heap[i] = heap[best]; heap[best] = t;
+            i = best;
+        }
+    }
+    return top;
+}
+
+static inline void qir__maybe_push_uncomp(
+    const qir_module_t *m,
+    const uint8_t *computed,
+    const uint8_t *uncomputed,
+    const uint8_t *can_uncomp,
+    const uint32_t *fwd_refs,
+    const uint32_t *uncomp_pin,
+    const uint8_t *is_pinned_out,
+    uint32_t uo,
+    uint32_t *heap,
+    uint32_t *len,
+    uint8_t *in_ready
+) {
+    if (uo == UINT32_MAX || uo >= m->num_ops) return;
+    if (!computed[uo] || uncomputed[uo] || !can_uncomp[uo] || in_ready[uo]) return;
+    const qir_op_t *dop = &m->ops[uo];
+    for (uint8_t ko = 0u; ko < dop->num_outs; ++ko) {
+        uint32_t ov = dop->outs[ko];
+        if (fwd_refs[ov] > 0u || uncomp_pin[ov] > 0u || is_pinned_out[ov]) return;
+    }
+    qir__heap_push(heap, len, in_ready, uo);
+}
+
+static inline void qir__alloc_step_temp(
+    const qir_module_t *m,
+    const qir_phys_plan_t *plan,
+    qir_sched_step_t *st,
+    qcc_arena_t *arena,
+    qir__qpool_t *pool,
+    uint32_t *peak_q,
+    bool *certified
+) {
+    uint32_t need_temp = st->num_temp_anc;
+    if (need_temp == 0u) return;
+    const qir_op_t *op = &m->ops[st->op_id];
+    bool uncomp = (st->kind == QIR_STEP_UNCOMPUTE);
+    bool can_borrow_zero = false;
+    if (op->num_outs > 0u) {
+        if (op->kind == QIR_OP_LUT_ROM && st->variant != QIR_VAR_LIN_GAUGE_TSP &&
+            !(uncomp && st->variant == QIR_VAR_HMR_PARITY_LUT)) {
+            can_borrow_zero = true;
+        } else if (op->kind == QIR_OP_GF2M_ADD && st->variant == QIR_VAR_XOR_ACCUM && st->num_chain_ops > 0u) {
+            const qir_op_t *dop = &m->ops[st->chain_ops[0]];
+            uint32_t sub_var = (st->aux_param >> 8u) & 0xFFu;
+            if (dop->kind == QIR_OP_LUT_ROM && sub_var != QIR_VAR_LIN_GAUGE_TSP) {
+                can_borrow_zero = true;
+            }
+        }
+    }
+
+    st->temp_anc = (uint32_t *)qcc_arena_alloc(arena, (size_t)need_temp * sizeof(uint32_t), 4u);
+    uint8_t *borrowed = (uint8_t *)calloc(need_temp, 1u);
+    uint32_t filled = 0u;
+    if (can_borrow_zero) {
+        uint32_t vid0 = op->outs[0];
+        const qir_val_alloc_t *va0 = &plan->val_allocs[vid0];
+        const qir_val_t *ov = &m->vals[vid0];
+        if (va0->qubits) {
+            for (uint16_t b = 0u; b < va0->width && filled < need_temp; ++b) {
+                if (qcc_bv_get(ov->zero_mask, b)) {
+                    borrowed[filled] = 1u;
+                    st->temp_anc[filled++] = va0->qubits[b];
+                }
+            }
+        }
+    }
+    while (filled < need_temp) {
+        st->temp_anc[filled++] = qir__pool_alloc_clean(pool, peak_q);
+    }
+    for (uint32_t a = 0u; a < need_temp; ++a) {
+        for (uint32_t b = a + 1u; b < need_temp; ++b) {
+            if (st->temp_anc[a] == st->temp_anc[b]) *certified = false;
+        }
+        if (!borrowed[a] && op->num_outs > 0u && !st->inplace_on_in0) {
+            const qir_val_alloc_t *va0 = &plan->val_allocs[op->outs[0]];
+            if (va0->qubits) {
+                for (uint16_t b = 0u; b < va0->width; ++b) {
+                    if (st->temp_anc[a] == va0->qubits[b]) *certified = false;
+                }
+            }
+            if (va0->aux_qubits) {
+                for (uint16_t b = 0u; b < va0->aux_width; ++b) {
+                    if (st->temp_anc[a] == va0->aux_qubits[b]) *certified = false;
+                }
+            }
+        }
+    }
+    for (uint32_t a = 0u; a < need_temp; ++a) {
+        if (!borrowed[a]) qir__pool_free_clean(pool, st->temp_anc[a]);
+    }
+    free(borrowed);
 }
 
 /* Construct physical schedule + execute Bit-Level Borrow Allocator + Disjointness Certificate */
@@ -331,9 +689,11 @@ static inline bool qir_regalloc_pack(
     /* Pre-build cached GF plans when needed */
     for (uint32_t oi = 0u; oi < m->num_ops; ++oi) {
         const qir_op_t *op = &m->ops[oi];
-        if (op->kind == QIR_OP_GF2M_MUL && op->u.gf2m.m == 12u && !out_plan->has_gf12_r42) {
+        if ((op->kind == QIR_OP_GF2M_MUL || (op->kind == QIR_OP_PHASE_DOT && op->num_ins >= 3u)) &&
+            op->u.gf2m.m == 12u && !out_plan->has_gf12_r42) {
             out_plan->has_gf12_r42 = qir_build_gf12_rank42(op->u.gf2m.irred_poly, &out_plan->gf12_r42);
-        } else if (op->kind == QIR_OP_GF2M_MUL && op->u.gf2m.m == 6u && !out_plan->has_gf64_r15) {
+        } else if ((op->kind == QIR_OP_GF2M_MUL || (op->kind == QIR_OP_PHASE_DOT && op->num_ins >= 3u)) &&
+                   op->u.gf2m.m == 6u && !out_plan->has_gf64_r15) {
             out_plan->has_gf64_r15 = qir_build_gf64_rank15(op->u.gf2m.irred_poly, &out_plan->gf64_r15);
         } else if (op->kind == QIR_OP_GF2M_INV && op->u.gf2m.m == 12u && !out_plan->has_gf12_tower) {
             out_plan->has_gf12_tower = qir_build_gf12_tower_inv(op->u.gf2m.irred_poly, &out_plan->gf12_tower);
@@ -392,6 +752,11 @@ static inline bool qir_regalloc_pack(
         if (en->variant == QIR_VAR_MUL_CONST_ADD && en->num_chain_ops > 0u) {
             for (uint16_t ci = 0u; ci < en->num_chain_ops; ++ci) op_skip[en->chain_ops[ci]] = 1u;
         }
+        if ((en->variant == QIR_VAR_CTRL_ADD_CUCCARO ||
+             en->variant == QIR_VAR_XOR_ACCUM ||
+             en->variant == QIR_VAR_GF2M_CONST_LINF2) && en->num_chain_ops > 0u) {
+            for (uint16_t ci = 0u; ci < en->num_chain_ops; ++ci) op_skip[en->chain_ops[ci]] = 1u;
+        }
     }
 
     for (uint32_t i = 0u; i < m->num_inputs; ++i) is_in[m->inputs[i]] = 1u;
@@ -406,9 +771,6 @@ static inline bool qir_regalloc_pack(
         bool try_alias = (def_oi != UINT32_MAX && !op_skip[def_oi] &&
                           m->ops[def_oi].pred_val == UINT32_MAX &&
                           (m->ops[def_oi].kind == QIR_OP_SLICE || m->ops[def_oi].kind == QIR_OP_CONCAT));
-        if (try_alias && eff_clean && is_direct_out[v] && m->vals[v].rep != QIR_REP_CLASSICAL) {
-            try_alias = false;
-        }
         if (try_alias) {
             const qir_op_t *dop = &m->ops[def_oi];
             uint16_t cnt = 0u;
@@ -482,13 +844,24 @@ static inline bool qir_regalloc_pack(
         step_back_cnt[oi] = cnt;
     }
 
-    /* Elide dead unconditional QIR_OP_CONST */
-    for (uint32_t oi = 0u; oi < m->num_ops; ++oi) {
+    /* Elide dead unconditional QIR_OP_CONST, QIR_OP_SLICE, QIR_OP_CONCAT in reverse topological order */
+    for (int32_t oi_s = (int32_t)m->num_ops - 1; oi_s >= 0; --oi_s) {
+        uint32_t oi = (uint32_t)oi_s;
         if (op_skip[oi]) continue;
         const qir_op_t *op = &m->ops[oi];
-        if (op->kind == QIR_OP_CONST && op->pred_val == UINT32_MAX && op->num_outs > 0u) {
+        if ((op->kind == QIR_OP_CONST || op->kind == QIR_OP_SLICE || op->kind == QIR_OP_CONCAT) &&
+            op->pred_val == UINT32_MAX && op->num_outs > 0u) {
             uint32_t ov = op->outs[0];
-            if (fwd_refs[ov] == 0u && !is_pinned_out[ov]) op_skip[oi] = 1u;
+            if (fwd_refs[ov] == 0u && !is_pinned_out[ov] && !is_direct_out[ov]) {
+                bool has_consumer = false;
+                for (uint32_t ci = oi + 1u; ci < m->num_ops && !has_consumer; ++ci) {
+                    if (op_skip[ci]) continue;
+                    for (uint16_t ii = 0u; ii < m->ops[ci].num_ins; ++ii) {
+                        if (m->ops[ci].ins[ii] == ov) { has_consumer = true; break; }
+                    }
+                }
+                if (!has_consumer) op_skip[oi] = 1u;
+            }
         }
     }
 
@@ -530,6 +903,9 @@ static inline bool qir_regalloc_pack(
 
     size_t max_steps = (size_t)m->num_ops * 2u + 16u;
     out_plan->steps  = (qir_sched_step_t *)calloc(max_steps, sizeof(qir_sched_step_t));
+    uint32_t *ready_heap = (uint32_t *)malloc(no * sizeof(uint32_t));
+    uint8_t  *in_ready   = (uint8_t *)calloc(no, 1u);
+    uint32_t  rh_len     = 0u;
     uint32_t ns      = 0u;
     bool certified   = true;
 
@@ -547,10 +923,12 @@ static inline bool qir_regalloc_pack(
             qir_val_alloc_t *dva = &out_plan->val_allocs[dst];
             dva->is_alias = 1u;
             if (m->vals[dst].rep == QIR_REP_CLASSICAL) {
+                if (!sva->cbits) continue;
                 dva->cwidth = w;
                 dva->cbits  = w ? (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
                 for (uint16_t b = 0u; b < w; ++b) dva->cbits[b] = sva->cbits[op->u.slice.lo + b];
             } else {
+                if (!sva->qubits) continue;
                 dva->width  = w;
                 dva->qubits = w ? (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
                 for (uint16_t b = 0u; b < w; ++b) dva->qubits[b] = sva->qubits[op->u.slice.lo + b];
@@ -568,6 +946,7 @@ static inline bool qir_regalloc_pack(
                 uint16_t pos = 0u;
                 for (uint16_t i = 0u; i < op->num_ins; ++i) {
                     const qir_val_alloc_t *iva = &out_plan->val_allocs[op->ins[i]];
+                    if (!iva->cbits) { pos += m->vals[op->ins[i]].width; continue; }
                     for (uint16_t b = 0u; b < iva->cwidth && pos < w; ++b, ++pos) dva->cbits[pos] = iva->cbits[b];
                 }
             } else {
@@ -576,6 +955,7 @@ static inline bool qir_regalloc_pack(
                 uint16_t pos = 0u;
                 for (uint16_t i = 0u; i < op->num_ins; ++i) {
                     const qir_val_alloc_t *iva = &out_plan->val_allocs[op->ins[i]];
+                    if (!iva->qubits) { pos += m->vals[op->ins[i]].width; continue; }
                     for (uint16_t b = 0u; b < iva->width && pos < w; ++b, ++pos) dva->qubits[pos] = iva->qubits[b];
                 }
             }
@@ -595,60 +975,89 @@ static inline bool qir_regalloc_pack(
         st.chain_ops        = en ? en->chain_ops : NULL;
         st.num_chain_ops    = en ? en->num_chain_ops : 0u;
         st.pred_cbit        = UINT32_MAX;
+        st.inplace_in_idx   = 0xFFu;
         if (op->pred_val != UINT32_MAX && op->pred_val < m->num_vals && out_plan->val_allocs[op->pred_val].cbits) {
             st.pred_cbit = out_plan->val_allocs[op->pred_val].cbits[0];
         }
 
-        /* Determine if LINF2 or OPAQUE_KMB acts in-place on unique dying wire bus */
-        if (!eff_clean && op->pred_val == UINT32_MAX && op->num_outs > 0u) {
+        /* Determine if op acts cleanly in-place on an operand (dying wire or same-name IO partner) */
+        if (op->pred_val == UINT32_MAX && op->num_outs == 1u) {
+            uint8_t cand_idx = 0xFFu;
+            uint32_t cand_v = UINT32_MAX;
+            uint32_t others[32];
+            uint32_t n_others = 0u;
+            bool allow = false;
+
             if (op->kind == QIR_OP_OPAQUE_KMB && op->num_ins == 1u) {
-                uint32_t src_v = op->ins[0];
-                if (m->vals[src_v].width == m->vals[op->outs[0]].width &&
-                    fwd_refs[src_v] == 1u && uncomp_pin[src_v] == 0u &&
-                    !is_pinned_out[src_v] && !will_alias[src_v] && !out_plan->val_allocs[src_v].is_alias &&
-                    (is_in[src_v] || (m->vals[src_v].def_op != UINT32_MAX &&
-                                       !qir__op_supports_uncompute(&m->ops[m->vals[src_v].def_op], false)))) {
-                    st.inplace_on_in0 = true;
-                    uint32_t dst = op->outs[0];
-                    out_plan->val_allocs[dst] = out_plan->val_allocs[src_v];
-                    out_plan->val_allocs[dst].is_pinned_io = is_pinned_out[dst];
-                    out_plan->val_allocs[src_v].is_alias = 1u;
-                }
+                cand_idx = 0u; cand_v = op->ins[0]; allow = true;
             } else if (op->kind == QIR_OP_LINF2 && st.variant == QIR_VAR_LINF2_GAUSS) {
                 const qir_op_t *src_op = (st.fused_linf2 && st.num_chain_ops > 0u) ? &m->ops[st.aux_param] : op;
                 if (src_op->num_ins == 1u) {
-                    uint32_t src_v = src_op->ins[0];
-                    if (m->vals[src_v].width == m->vals[op->outs[0]].width &&
-                        fwd_refs[src_v] == 1u && uncomp_pin[src_v] == 0u &&
-                        !is_pinned_out[src_v] && !will_alias[src_v] && !out_plan->val_allocs[src_v].is_alias &&
-                        (is_in[src_v] || (m->vals[src_v].def_op != UINT32_MAX &&
-                                           !qir__op_supports_uncompute(&m->ops[m->vals[src_v].def_op], false)))) {
-                        uint16_t w = m->vals[op->outs[0]].width;
-                        const qir_linf2_payload_t *lf = st.fused_linf2 ? st.fused_linf2 : &op->u.linf2;
-                        qcc_bv256_t *M = (qcc_bv256_t *)malloc((size_t)(w ? w : 1u) * sizeof(qcc_bv256_t));
-                        memcpy(M, lf->rows, (size_t)w * sizeof(qcc_bv256_t));
-                        bool inv_ok = true;
-                        for (uint32_t col = 0u; col < w; ++col) {
-                            uint32_t piv = col;
-                            while (piv < w && !qcc_bv_get(M[piv].w, col)) ++piv;
-                            if (piv == w) { inv_ok = false; break; }
-                            if (piv != col) { qcc_bv256_t t = M[col]; M[col] = M[piv]; M[piv] = t; }
-                            for (uint32_t r = 0u; r < w; ++r) {
-                                if (r != col && qcc_bv_get(M[r].w, col)) {
-                                    for (uint32_t ww = 0u; ww < QIR_WORDS; ++ww) M[r].w[ww] ^= M[col].w[ww];
-                                }
+                    cand_idx = 0u; cand_v = src_op->ins[0];
+                    uint16_t w = m->vals[op->outs[0]].width;
+                    const qir_linf2_payload_t *lf = st.fused_linf2 ? st.fused_linf2 : &op->u.linf2;
+                    qcc_bv256_t *M = (qcc_bv256_t *)malloc((size_t)(w ? w : 1u) * sizeof(qcc_bv256_t));
+                    memcpy(M, lf->rows, (size_t)w * sizeof(qcc_bv256_t));
+                    bool inv_ok = true;
+                    for (uint32_t col = 0u; col < w; ++col) {
+                        uint32_t piv = col;
+                        while (piv < w && !qcc_bv_get(M[piv].w, col)) ++piv;
+                        if (piv == w) { inv_ok = false; break; }
+                        if (piv != col) { qcc_bv256_t t = M[col]; M[col] = M[piv]; M[piv] = t; }
+                        for (uint32_t r = 0u; r < w; ++r) {
+                            if (r != col && qcc_bv_get(M[r].w, col)) {
+                                for (uint32_t ww = 0u; ww < QIR_WORDS; ++ww) M[r].w[ww] ^= M[col].w[ww];
                             }
                         }
-                        free(M);
-                        if (inv_ok) {
-                            st.inplace_on_in0 = true;
-                            uint32_t dst = op->outs[0];
-                            out_plan->val_allocs[dst] = out_plan->val_allocs[src_v];
-                            out_plan->val_allocs[dst].is_pinned_io = is_pinned_out[dst];
-                            out_plan->val_allocs[src_v].is_alias = 1u;
-                        }
                     }
+                    free(M);
+                    allow = inv_ok;
                 }
+            } else if (op->kind == QIR_OP_GF2M_MUL && st.variant == QIR_VAR_GF2M_CONST_LINF2 && op->num_ins == 2u) {
+                uint32_t var_idx = st.aux_param & 1u;
+                uint32_t cvid = op->ins[var_idx ^ 1u];
+                uint16_t dm = op->u.gf2m.m;
+                uint32_t dmask = (dm == 32u) ? UINT32_MAX : ((UINT32_C(1) << dm) - 1u);
+                if ((m->vals[cvid].const_val[0] & dmask) != 0u) {
+                    cand_idx = (uint8_t)var_idx;
+                    cand_v   = op->ins[var_idx];
+                    allow    = true;
+                }
+            } else if ((op->kind == QIR_OP_ADD || op->kind == QIR_OP_SUB || op->kind == QIR_OP_GF2M_ADD) &&
+                       st.variant == QIR_VAR_INPLACE_ARITH && op->num_ins == 2u) {
+                uint32_t tidx = st.aux_param & 1u;
+                cand_idx = (uint8_t)tidx;
+                cand_v   = op->ins[tidx];
+                others[n_others++] = op->ins[tidx ^ 1u];
+                allow = (op->ins[0] != op->ins[1]);
+            } else if (op->kind == QIR_OP_CTRL_SEL && st.variant == QIR_VAR_CTRL_ADD_CUCCARO && st.num_chain_ops > 0u && op->num_ins == 3u) {
+                uint32_t lhs_vid = st.aux_param & UINT32_C(0x7FFFFFFF);
+                cand_idx = 1u;
+                cand_v   = op->ins[1];
+                others[n_others++] = op->ins[0];
+                others[n_others++] = lhs_vid;
+                allow = (cand_v != op->ins[0] && cand_v != lhs_vid);
+            } else if (op->kind == QIR_OP_GF2M_ADD && st.variant == QIR_VAR_XOR_ACCUM && st.num_chain_ops > 0u && op->num_ins == 2u) {
+                uint32_t acc_idx = st.aux_param & 3u;
+                const qir_op_t *dop = &m->ops[st.chain_ops[0]];
+                cand_idx = (uint8_t)acc_idx;
+                cand_v   = op->ins[acc_idx];
+                allow    = true;
+                for (uint16_t i = 0u; i < dop->num_ins && n_others < 32u; ++i) {
+                    if (dop->ins[i] == cand_v) allow = false;
+                    others[n_others++] = dop->ins[i];
+                }
+            }
+
+            if (allow && qir__can_exec_inplace(m, out_plan, op_skip, will_alias, is_in, is_pinned_out,
+                                               is_direct_out, fwd_refs, uncomp_pin, back_vals, back_cnt,
+                                               op, cand_v, others, n_others, eff_clean)) {
+                st.inplace_on_in0 = true;
+                st.inplace_in_idx = cand_idx;
+                uint32_t dst = op->outs[0];
+                out_plan->val_allocs[dst] = out_plan->val_allocs[cand_v];
+                out_plan->val_allocs[dst].is_pinned_io = is_pinned_out[dst];
+                out_plan->val_allocs[cand_v].is_alias = 1u;
             }
         }
 
@@ -685,33 +1094,7 @@ static inline bool qir_regalloc_pack(
         st.num_temp_anc = need_temp;
         st.cbit_base    = cbit;
         cbit           += need_cb;
-        if (need_temp > 0u) {
-            st.temp_anc = (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)need_temp * sizeof(uint32_t), 4u);
-            for (uint32_t a = 0u; a < need_temp; ++a) {
-                st.temp_anc[a] = qir__pool_alloc_clean(&pool, &peak_q);
-            }
-            for (uint32_t a = 0u; a < need_temp; ++a) {
-                for (uint32_t b = a + 1u; b < need_temp; ++b) {
-                    if (st.temp_anc[a] == st.temp_anc[b]) certified = false;
-                }
-                if (op->num_outs > 0u && !st.inplace_on_in0) {
-                    const qir_val_alloc_t *va0 = &out_plan->val_allocs[op->outs[0]];
-                    if (va0->qubits) {
-                        for (uint16_t b = 0u; b < va0->width; ++b) {
-                            if (st.temp_anc[a] == va0->qubits[b]) certified = false;
-                        }
-                    }
-                    if (va0->aux_qubits) {
-                        for (uint16_t b = 0u; b < va0->aux_width; ++b) {
-                            if (st.temp_anc[a] == va0->aux_qubits[b]) certified = false;
-                        }
-                    }
-                }
-            }
-            for (uint32_t a = 0u; a < need_temp; ++a) {
-                qir__pool_free_clean(&pool, st.temp_anc[a]);
-            }
-        }
+        qir__alloc_step_temp(m, out_plan, &st, eg->arena, &pool, &peak_q, &certified);
 
         if (peak_q > live_peak_q) {
             live_peak_q = peak_q;
@@ -740,10 +1123,18 @@ static inline bool qir_regalloc_pack(
             }
         }
 
-        /* Decrement forward refcounts on consumed backing operands */
+        /* Decrement forward refcounts on consumed backing operands & enqueue ready uncomputes */
         for (uint16_t bi = 0u; bi < step_back_cnt[oi]; ++bi) {
             uint32_t bv = step_back_ins[(size_t)oi * 64u + bi];
             if (fwd_refs[bv] > 0u) fwd_refs[bv]--;
+            if (do_uncompute && fwd_refs[bv] == 0u && uncomp_pin[bv] == 0u) {
+                qir__maybe_push_uncomp(m, computed, uncomputed, can_uncomp, fwd_refs, uncomp_pin,
+                                       is_pinned_out, m->vals[bv].def_op, ready_heap, &rh_len, in_ready);
+            }
+        }
+        if (do_uncompute) {
+            qir__maybe_push_uncomp(m, computed, uncomputed, can_uncomp, fwd_refs, uncomp_pin,
+                                   is_pinned_out, oi, ready_heap, &rh_len, in_ready);
         }
 
         /* HMR_MEAS resets non-alias non-pinned input qubits cleanly back to |0> */
@@ -759,70 +1150,66 @@ static inline bool qir_regalloc_pack(
             }
         }
 
-        /* Cascading Reverse-Topological Clean Uncomputation */
+        /* O(N log N) Cascading Reverse-Topological Clean Uncomputation via Ready Max-Heap */
         if (do_uncompute) {
-            bool prog = true;
-            while (prog) {
-                prog = false;
-                for (int32_t uo_s = (int32_t)oi; uo_s >= 0; --uo_s) {
-                    uint32_t uo = (uint32_t)uo_s;
-                    if (!computed[uo] || uncomputed[uo] || !can_uncomp[uo]) continue;
-                    const qir_op_t *dop = &m->ops[uo];
-                    bool all_outs_free = true;
-                    for (uint8_t ko = 0u; ko < dop->num_outs; ++ko) {
-                        uint32_t ov = dop->outs[ko];
-                        if (fwd_refs[ov] > 0u || uncomp_pin[ov] > 0u || is_pinned_out[ov]) {
-                            all_outs_free = false;
-                            break;
-                        }
+            while (rh_len > 0u) {
+                uint32_t uo = qir__heap_pop(ready_heap, &rh_len, in_ready);
+                if (!computed[uo] || uncomputed[uo] || !can_uncomp[uo]) continue;
+                const qir_op_t *dop = &m->ops[uo];
+                bool all_outs_free = true;
+                for (uint8_t ko = 0u; ko < dop->num_outs; ++ko) {
+                    uint32_t ov = dop->outs[ko];
+                    if (fwd_refs[ov] > 0u || uncomp_pin[ov] > 0u || is_pinned_out[ov]) {
+                        all_outs_free = false;
+                        break;
                     }
-                    if (!all_outs_free) continue;
+                }
+                if (!all_outs_free) continue;
 
-                    const qir_enode_t *den = &eg->enodes[out_plan->chosen_enodes[dop->outs[0]]];
-                    qir_sched_step_t ust;
-                    memset(&ust, 0, sizeof(ust));
-                    ust.kind             = QIR_STEP_UNCOMPUTE;
-                    ust.op_id            = uo;
-                    ust.variant          = den->variant;
-                    ust.aux_param        = den->aux_param;
-                    ust.approx_keep_bits = (approx_widths && (dop->flags & QIR_FLAG_APPROX)) ? approx_widths[uo] : m->vals[dop->outs[0]].width;
-                    ust.fused_linf2      = den->fused_linf2;
-                    ust.gauge_lut        = den->gauge_lut;
-                    ust.phase_split      = den->phase_split;
-                    ust.chain_ops        = den->chain_ops;
-                    ust.num_chain_ops    = den->num_chain_ops;
-                    ust.pred_cbit        = UINT32_MAX;
-                    if (dop->pred_val != UINT32_MAX && dop->pred_val < m->num_vals && out_plan->val_allocs[dop->pred_val].cbits) {
-                        ust.pred_cbit = out_plan->val_allocs[dop->pred_val].cbits[0];
-                    }
+                const qir_enode_t *den = &eg->enodes[out_plan->chosen_enodes[dop->outs[0]]];
+                qir_sched_step_t ust;
+                memset(&ust, 0, sizeof(ust));
+                ust.kind             = QIR_STEP_UNCOMPUTE;
+                ust.op_id            = uo;
+                ust.variant          = den->variant;
+                ust.aux_param        = den->aux_param;
+                ust.approx_keep_bits = (approx_widths && (dop->flags & QIR_FLAG_APPROX)) ? approx_widths[uo] : m->vals[dop->outs[0]].width;
+                ust.fused_linf2      = den->fused_linf2;
+                ust.gauge_lut        = den->gauge_lut;
+                ust.phase_split      = den->phase_split;
+                ust.chain_ops        = den->chain_ops;
+                ust.num_chain_ops    = den->num_chain_ops;
+                ust.pred_cbit        = UINT32_MAX;
+                ust.inplace_in_idx   = 0xFFu;
+                if (dop->pred_val != UINT32_MAX && dop->pred_val < m->num_vals && out_plan->val_allocs[dop->pred_val].cbits) {
+                    ust.pred_cbit = out_plan->val_allocs[dop->pred_val].cbits[0];
+                }
 
-                    uint32_t u_temp = 0u, u_cb = 0u, u_aux = 0u;
-                    qir__query_step_temp(m, out_plan, &ust, &u_temp, &u_cb, &u_aux);
-                    ust.num_temp_anc = u_temp;
-                    ust.cbit_base    = cbit;
-                    cbit            += u_cb;
-                    if (u_temp > 0u) {
-                        ust.temp_anc = (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)u_temp * sizeof(uint32_t), 4u);
-                        for (uint32_t a = 0u; a < u_temp; ++a) ust.temp_anc[a] = qir__pool_alloc_clean(&pool, &peak_q);
-                        for (uint32_t a = 0u; a < u_temp; ++a) qir__pool_free_clean(&pool, ust.temp_anc[a]);
-                    }
-                    if (ns >= max_steps) {
-                        max_steps *= 2u;
-                        out_plan->steps = (qir_sched_step_t *)realloc(out_plan->steps, max_steps * sizeof(qir_sched_step_t));
-                    }
-                    out_plan->steps[ns++] = ust;
+                uint32_t u_temp = 0u, u_cb = 0u, u_aux = 0u;
+                qir__query_step_temp(m, out_plan, &ust, &u_temp, &u_cb, &u_aux);
+                ust.num_temp_anc = u_temp;
+                ust.cbit_base    = cbit;
+                cbit            += u_cb;
+                qir__alloc_step_temp(m, out_plan, &ust, eg->arena, &pool, &peak_q, &certified);
+                if (ns >= max_steps) {
+                    max_steps *= 2u;
+                    out_plan->steps = (qir_sched_step_t *)realloc(out_plan->steps, max_steps * sizeof(qir_sched_step_t));
+                }
+                out_plan->steps[ns++] = ust;
 
-                    for (uint8_t ko = 0u; ko < dop->num_outs; ++ko) {
-                        const qir_val_alloc_t *uva = &out_plan->val_allocs[dop->outs[ko]];
-                        for (uint16_t b = 0u; b < uva->width; ++b) qir__pool_free_clean(&pool, uva->qubits[b]);
-                        for (uint16_t b = 0u; b < uva->aux_width; ++b) qir__pool_free_clean(&pool, uva->aux_qubits[b]);
+                for (uint8_t ko = 0u; ko < dop->num_outs; ++ko) {
+                    const qir_val_alloc_t *uva = &out_plan->val_allocs[dop->outs[ko]];
+                    for (uint16_t b = 0u; b < uva->width; ++b) qir__pool_free_clean(&pool, uva->qubits[b]);
+                    for (uint16_t b = 0u; b < uva->aux_width; ++b) qir__pool_free_clean(&pool, uva->aux_qubits[b]);
+                }
+                uncomputed[uo] = 1u;
+                for (uint16_t bi = 0u; bi < step_back_cnt[uo]; ++bi) {
+                    uint32_t bv = step_back_ins[(size_t)uo * 64u + bi];
+                    if (uncomp_pin[bv] > 0u) uncomp_pin[bv]--;
+                    if (fwd_refs[bv] == 0u && uncomp_pin[bv] == 0u) {
+                        qir__maybe_push_uncomp(m, computed, uncomputed, can_uncomp, fwd_refs, uncomp_pin,
+                                               is_pinned_out, m->vals[bv].def_op, ready_heap, &rh_len, in_ready);
                     }
-                    uncomputed[uo] = 1u;
-                    for (uint16_t bi = 0u; bi < step_back_cnt[uo]; ++bi) {
-                        uint32_t bv = step_back_ins[(size_t)uo * 64u + bi];
-                        if (uncomp_pin[bv] > 0u) uncomp_pin[bv]--;
-                    }
-                    prog = true;
                 }
             }
         }
@@ -834,14 +1221,14 @@ static inline bool qir_regalloc_pack(
         const qir_val_alloc_t *va = &out_plan->val_allocs[m->inputs[i]];
         for (uint16_t b = 0u; b < va->width; ++b) {
             uint32_t q = va->qubits[b];
-            if (q < 4096u) io_busy[q >> 6u] |= (UINT64_C(1) << (q & 63u));
+            if (q < 8192u) io_busy[q >> 6u] |= (UINT64_C(1) << (q & 63u));
         }
     }
     for (uint32_t i = 0u; i < m->num_outputs; ++i) {
         const qir_val_alloc_t *va = &out_plan->val_allocs[m->outputs[i]];
         for (uint16_t b = 0u; b < va->width; ++b) {
             uint32_t q = va->qubits[b];
-            if (q < 4096u) io_busy[q >> 6u] |= (UINT64_C(1) << (q & 63u));
+            if (q < 8192u) io_busy[q >> 6u] |= (UINT64_C(1) << (q & 63u));
         }
     }
     bool clean_ok = true;
@@ -858,6 +1245,7 @@ static inline bool qir_regalloc_pack(
     out_plan->max_live_frustration_op = peak_op;
     if (out_peak_op_at_max) *out_peak_op_at_max = peak_op;
 
+    free(ready_heap); free(in_ready);
     free(op_skip); free(will_alias); free(is_direct_out); free(is_in); free(is_pinned_out);
     free(hmr_measured); free(can_uncomp); free(computed); free(uncomputed);
     free(fwd_refs); free(uncomp_pin); free(back_vals); free(back_cnt);
@@ -964,8 +1352,9 @@ static inline bool qir_optimize_module(
             qir_op_kind_t ok = mod->ops[dop].kind;
             if (ok == QIR_OP_LUT_ROM) sc += (uint64_t)mod->ops[dop].u.lut.num_entries * 20u + 2000u;
             else if (ok == QIR_OP_PHASE_POLY) sc += 5000u;
+            else if (ok == QIR_OP_GF2M_ADD) sc += 2500u;
             else if (ok == QIR_OP_MUL_FXP || ok == QIR_OP_SQR_FXP) sc += 1500u;
-            else if (ok == QIR_OP_GF2M_INV || ok == QIR_OP_GF2M_MUL) sc += 1200u;
+            else if (ok == QIR_OP_GF2M_INV || ok == QIR_OP_GF2M_MUL || ok == QIR_OP_CTRL_SEL) sc += 1200u;
             else if (ok == QIR_OP_ADD || ok == QIR_OP_SUB || ok == QIR_OP_LINF2) sc += 400u;
         }
         all_multi[n_all_multi]   = c;
@@ -989,7 +1378,7 @@ static inline bool qir_optimize_module(
     for (uint32_t i = 0u; i < n_all_multi && n_multi < 192u; ++i) {
         uint32_t cid = all_multi[i];
         uint32_t ne = eg->classes[cid].num_enodes;
-        uint8_t b = (ne > 4u) ? 3u : ((ne > 2u) ? 2u : 1u);
+        uint8_t b = (ne > 16u) ? 5u : ((ne > 8u) ? 4u : ((ne > 4u) ? 3u : ((ne > 2u) ? 2u : 1u)));
         if (n_egraph_vars + b > 192u) break;
         multi_cls[n_multi]   = cid;
         cls_bits[n_multi]    = b;
@@ -1030,12 +1419,12 @@ static inline bool qir_optimize_module(
     free(all_uncomp);
     free(uncomp_sc);
 
-    /* Backward reachability from PHASE_POLY so phase-feeding approx ops remain bit-exact */
+    /* Backward reachability from PHASE_POLY / PHASE_DOT so phase-feeding approx ops remain bit-exact */
     uint8_t *feeds_phase_val = (uint8_t *)calloc(eg->num_classes ? eg->num_classes : 1u, 1u);
     uint8_t *feeds_phase_op  = (uint8_t *)calloc(no, 1u);
     for (uint32_t oi = 0u; oi < mod->num_ops; ++oi) {
         const qir_op_t *op = &mod->ops[oi];
-        if (op->kind == QIR_OP_PHASE_POLY) {
+        if (op->kind == QIR_OP_PHASE_POLY || op->kind == QIR_OP_PHASE_DOT) {
             feeds_phase_op[oi] = 1u;
             for (uint16_t ii = 0u; ii < op->num_ins; ++ii) feeds_phase_val[op->ins[ii]] = 1u;
         }
@@ -1085,12 +1474,42 @@ static inline bool qir_optimize_module(
     }
     uint64_t best_score = qir__score_plan(&best_plan, &cfg);
 
-    /* Phase 2: Genuine FLOW 2-Jet Continuous Precision Relaxation for non-phase QIR_FLAG_APPROX ops */
+    /* Phase 1b: Single-class coordinate sweep so SEARU starts from exact rule-enabled best */
+    for (uint32_t mi = 0u; mi < n_multi; ++mi) {
+        uint32_t cid = multi_cls[mi];
+        const qir_eclass_t *ec = &eg->classes[cid];
+        uint32_t best_eid = base_choices[cid];
+        for (uint32_t ei = 0u; ei < ec->num_enodes; ++ei) {
+            uint32_t eid = ec->enodes[ei];
+            uint8_t rt = eg->enodes[eid].rule_tag;
+            if (rt != 0u && !((cfg.enabled_rules >> rt) & 1u)) continue;
+            base_choices[cid] = eid;
+            qir_phys_plan_t cplan;
+            uint32_t pk_op = 0u;
+            if (qir_regalloc_pack(eg, base_choices, uncomp_flags, approx_widths, true, eff_clean, &cplan, &pk_op)) {
+                uint64_t sc = qir__score_plan(&cplan, &cfg);
+                if (sc < best_score) {
+                    qir_phys_plan_free(&best_plan);
+                    best_plan  = cplan;
+                    best_score = sc;
+                    best_eid   = eid;
+                } else {
+                    qir_phys_plan_free(&cplan);
+                }
+            }
+        }
+        base_choices[cid] = best_eid;
+    }
+
+    /* Phase 2: Genuine FLOW 2-Jet Continuous Precision Relaxation for QIR_FLAG_APPROX ops */
     uint32_t flow_steps = cfg.flow_iters ? cfg.flow_iters : 16u;
     bool has_approx = false;
     for (uint32_t oi = 0u; oi < mod->num_ops; ++oi) {
-        if ((mod->ops[oi].flags & QIR_FLAG_APPROX) && !feeds_phase_op[oi] &&
-            mod->ops[oi].approx_tol_q16 >= (UINT32_C(1) << 16u) && mod->ops[oi].num_outs > 0u) {
+        const qir_op_t *op = &mod->ops[oi];
+        bool is_cg = ((op->kind == QIR_OP_MUL_FXP || op->kind == QIR_OP_SQR_FXP) &&
+                      (op->flags & QIR_FLAG_APPROX) && op->u.mul.keep_exact == 2u);
+        if ((op->flags & QIR_FLAG_APPROX) && (!feeds_phase_op[oi] || is_cg) &&
+            op->approx_tol_q16 >= (UINT32_C(1) << 16u) && op->num_outs > 0u) {
             has_approx = true;
             break;
         }
@@ -1099,7 +1518,9 @@ static inline bool qir_optimize_module(
         flow_cell *flow_arena = (flow_cell *)calloc(32u, sizeof(flow_cell));
         for (uint32_t oi = 0u; oi < mod->num_ops; ++oi) {
             const qir_op_t *op = &mod->ops[oi];
-            if (!(op->flags & QIR_FLAG_APPROX) || feeds_phase_op[oi] ||
+            bool is_cg = ((op->kind == QIR_OP_MUL_FXP || op->kind == QIR_OP_SQR_FXP) &&
+                          (op->flags & QIR_FLAG_APPROX) && op->u.mul.keep_exact == 2u);
+            if (!(op->flags & QIR_FLAG_APPROX) || (feeds_phase_op[oi] && !is_cg) ||
                 op->approx_tol_q16 < (UINT32_C(1) << 16u) || op->num_outs == 0u) {
                 continue;
             }
@@ -1107,7 +1528,9 @@ static inline bool qir_optimize_module(
             uint16_t out_w   = mod->vals[op->outs[0]].width;
             uint32_t tol_lsb = op->approx_tol_q16 >> 16u;
             uint16_t min_keep = full_w;
-            if (op->kind == QIR_OP_MUL_FXP || op->kind == QIR_OP_SQR_FXP) {
+            if (is_cg) {
+                min_keep = (out_w + tol_lsb < full_w) ? (uint16_t)(out_w + tol_lsb) : full_w;
+            } else if (op->kind == QIR_OP_MUL_FXP || op->kind == QIR_OP_SQR_FXP) {
                 min_keep = (tol_lsb >= 2u) ? out_w : full_w;
             } else {
                 uint32_t drop_bits = 0u;
@@ -1198,7 +1621,11 @@ static inline bool qir_optimize_module(
     }
     for (uint32_t mi = 0u; mi < n_multi; ++mi) {
         uint32_t off = cls_bit_off[mi];
-        uint32_t code = (eg->classes[multi_cls[mi]].num_enodes >= 3u) ? 2u : 1u;
+        const qir_eclass_t *ec = &eg->classes[multi_cls[mi]];
+        uint32_t code = 0u;
+        for (uint32_t ei = 0u; ei < ec->num_enodes; ++ei) {
+            if (ec->enodes[ei] == base_choices[multi_cls[mi]]) { code = ei; break; }
+        }
         for (uint8_t bi = 0u; bi < cls_bits[mi]; ++bi) {
             if ((code >> bi) & 1u) qcc_bv_set(init_c, off + bi);
         }
@@ -1270,6 +1697,7 @@ static inline bool qir_optimize_module(
         }
     );
 
+    best_plan.emit_clean_reg = cfg.emit_clean_reg;
     *out_plan = best_plan;
     free(feeds_phase_val);
     free(feeds_phase_op);

@@ -41,6 +41,7 @@ typedef struct {
     uint32_t           cbit_base;
     uint32_t           pred_cbit; /* UINT32_MAX if unconditional */
     bool               inplace_on_in0;
+    uint8_t            inplace_in_idx; /* 0xFF when out-of-place, else input index */
 } qir_sched_step_t;
 
 typedef struct {
@@ -84,6 +85,7 @@ typedef struct {
     uint64_t              est_reaction_depth;
     bool                  disjointness_certified;
     bool                  clean_scratch_certified;
+    bool                  emit_clean_reg;
     uint32_t              max_live_frustration_op;
 } qir_phys_plan_t;
 
@@ -237,6 +239,29 @@ static inline bool qir_codegen_or_count(
         }
     }
 
+    /* O(num_steps) precompute folded ops from R1/R3/R4/R9/R10b/R10c/R11 super-nodes */
+    uint8_t *folded_op = m->num_ops ? (uint8_t *)calloc(m->num_ops, 1u) : NULL;
+    for (uint32_t sj = 0u; sj < plan->num_steps; ++sj) {
+        const qir_sched_step_t *s2 = &plan->steps[sj];
+        if (s2->num_chain_ops == 0u || !s2->chain_ops) continue;
+        if (s2->variant == QIR_VAR_CSA_TREE) {
+            for (uint16_t ci = 0u; ci + 1u < s2->num_chain_ops; ++ci) {
+                uint32_t co = s2->chain_ops[ci];
+                if (co < m->num_ops && co != s2->op_id) folded_op[co] = 1u;
+            }
+        } else if (s2->variant == QIR_VAR_LINF2_GAUSS ||
+                   s2->variant == QIR_VAR_PHASE_CSA_DIRECT ||
+                   s2->variant == QIR_VAR_MUL_CONST_ADD ||
+                   s2->variant == QIR_VAR_CTRL_ADD_CUCCARO ||
+                   s2->variant == QIR_VAR_XOR_ACCUM ||
+                   s2->variant == QIR_VAR_GF2M_CONST_LINF2) {
+            for (uint16_t ci = 0u; ci < s2->num_chain_ops; ++ci) {
+                uint32_t co = s2->chain_ops[ci];
+                if (co < m->num_ops && co != s2->op_id) folded_op[co] = 1u;
+            }
+        }
+    }
+
     for (uint32_t si = 0u; si < plan->num_steps; ++si) {
         const qir_sched_step_t *st = &plan->steps[si];
         const qir_op_t *op = &m->ops[st->op_id];
@@ -246,26 +271,7 @@ static inline bool qir_codegen_or_count(
         }
 
         if (st->variant == QIR_VAR_TRIVIAL_ELIDE) continue;
-
-        /* Skip intermediate ops folded into R1/R3/R4/R9 super-nodes */
-        bool is_folded = false;
-        for (uint32_t sj = 0u; sj < plan->num_steps; ++sj) {
-            const qir_sched_step_t *s2 = &plan->steps[sj];
-            if (s2->op_id == st->op_id || s2->num_chain_ops == 0u) continue;
-            if (s2->variant == QIR_VAR_CSA_TREE) {
-                for (uint16_t ci = 0u; ci + 1u < s2->num_chain_ops; ++ci) {
-                    if (s2->chain_ops[ci] == st->op_id) { is_folded = true; break; }
-                }
-            } else if (s2->variant == QIR_VAR_LINF2_GAUSS ||
-                       s2->variant == QIR_VAR_PHASE_CSA_DIRECT ||
-                       s2->variant == QIR_VAR_MUL_CONST_ADD) {
-                for (uint16_t ci = 0u; ci < s2->num_chain_ops; ++ci) {
-                    if (s2->chain_ops[ci] == st->op_id) { is_folded = true; break; }
-                }
-            }
-            if (is_folded) break;
-        }
-        if (is_folded) continue;
+        if (folded_op && folded_op[st->op_id]) continue;
 
         bool has_pred = (st->pred_cbit != UINT32_MAX);
         if (has_pred) {
@@ -453,6 +459,15 @@ static inline bool qir_codegen_or_count(
                         break;
                     }
                 }
+                if (st->variant == QIR_VAR_INPLACE_ARITH && st->inplace_on_in0 && st->inplace_in_idx < 2u) {
+                    uint8_t tidx = st->inplace_in_idx;
+                    uint32_t lhs_vid = op->ins[tidx ^ 1u];
+                    const uint32_t *lhs_q = plan->val_allocs[lhs_vid].qubits;
+                    uint16_t wl = m->vals[lhs_vid].width;
+                    if (!uncomp) qk_gidney_iadd_asym(kb_or_null, &kc, lhs_q, wl, out_q, out_w, st->temp_anc, &cbit);
+                    else         qk_gidney_isub_asym(kb_or_null, &kc, lhs_q, wl, out_q, out_w, st->temp_anc, &cbit);
+                    break;
+                }
                 uint16_t w0 = m->vals[op->ins[0]].width;
                 uint16_t w1 = m->vals[op->ins[1]].width;
                 uint16_t c0 = (w0 < out_w) ? w0 : out_w;
@@ -467,6 +482,20 @@ static inline bool qir_codegen_or_count(
                 break;
             }
             case QIR_OP_SUB: {
+                if (st->variant == QIR_VAR_INPLACE_ARITH && st->inplace_on_in0 && st->inplace_in_idx < 2u) {
+                    uint8_t tidx = st->inplace_in_idx;
+                    uint32_t lhs_vid = op->ins[tidx ^ 1u];
+                    const uint32_t *lhs_q = plan->val_allocs[lhs_vid].qubits;
+                    uint16_t wl = m->vals[lhs_vid].width;
+                    if (tidx == 0u) {
+                        if (!uncomp) qk_gidney_isub_asym(kb_or_null, &kc, lhs_q, wl, out_q, out_w, st->temp_anc, &cbit);
+                        else         qk_gidney_iadd_asym(kb_or_null, &kc, lhs_q, wl, out_q, out_w, st->temp_anc, &cbit);
+                    } else {
+                        for (uint16_t b = 0u; b < out_w; ++b) qk_x(kb_or_null, &kc, qk__q(out_q, b));
+                        qk_gidney_iadd_p1(kb_or_null, &kc, lhs_q, out_q, st->temp_anc, out_w, &cbit);
+                    }
+                    break;
+                }
                 uint16_t w0 = m->vals[op->ins[0]].width;
                 uint16_t w1 = m->vals[op->ins[1]].width;
                 uint16_t c0 = (w0 < out_w) ? w0 : out_w;
@@ -543,6 +572,97 @@ static inline bool qir_codegen_or_count(
                 break;
             }
             case QIR_OP_GF2M_ADD: {
+                if (st->variant == QIR_VAR_XOR_ACCUM && st->num_chain_ops > 0u) {
+                    const qir_op_t *dop = &m->ops[st->chain_ops[0]];
+                    uint32_t acc_idx = st->aux_param & 3u;
+                    qir_variant_kind_t sub_var = (qir_variant_kind_t)((st->aux_param >> 8u) & 0xFFu);
+                    uint32_t sub_aux = st->aux_param >> 16u;
+                    const uint32_t *acc_q = plan->val_allocs[op->ins[acc_idx]].qubits;
+                    bool ip = st->inplace_on_in0 && (st->inplace_in_idx == acc_idx);
+                    if (!uncomp && !ip) {
+                        for (uint16_t b = 0u; b < out_w; ++b) qk_cx(kb_or_null, &kc, qk__q(acc_q, b), qk__q(out_q, b));
+                    }
+                    if (dop->kind == QIR_OP_LUT_ROM) {
+                        const qir_lut_payload_t *lut = &dop->u.lut;
+                        const uint32_t *k_q = plan->val_allocs[dop->ins[0]].qubits;
+                        uint16_t vb = lut->val_bits;
+                        if (sub_var == QIR_VAR_QROAM_VSLOT0) {
+                            qk_qroam_vslot0(kb_or_null, &kc, lut->table, lut->num_entries, lut->val_words,
+                                            0u, vb, k_q, lut->key_bits, out_q, sub_aux ? sub_aux : 1u,
+                                            st->temp_anc, st->num_temp_anc, &cbit);
+                        } else if (sub_var == QIR_VAR_QROAM_SPLIT) {
+                            uint32_t K = sub_aux & 0xFFu;
+                            uint32_t b_sh = (sub_aux >> 8u) & 0xFFu;
+                            if (K < 2u) K = 2u;
+                            if (b_sh == 0u) b_sh = 1u;
+                            uint32_t chunk = (vb + K - 1u) / K;
+                            if (chunk == 0u) chunk = 1u;
+                            for (uint32_t lo = 0u; lo < vb; lo += chunk) {
+                                uint32_t hi = (lo + chunk < vb) ? (lo + chunk) : vb;
+                                qk_qroam_vslot0(kb_or_null, &kc, lut->table, lut->num_entries, lut->val_words,
+                                                lo, hi, k_q, lut->key_bits, out_q ? (out_q + lo) : NULL,
+                                                b_sh, st->temp_anc, st->num_temp_anc, &cbit);
+                            }
+                        } else if (sub_var == QIR_VAR_LIN_GAUGE_TSP && st->gauge_lut) {
+                            const qir_gauge_lut_t *gl = st->gauge_lut;
+                            uint32_t rb = gl->rank_bits;
+                            const uint32_t *comp_q   = st->temp_anc;
+                            const uint32_t *qrom_anc = st->temp_anc ? (st->temp_anc + rb) : NULL;
+                            for (uint32_t r = 0u; r < rb; ++r) qk_r(kb_or_null, &kc, qk__q(comp_q, r));
+                            qk_lut_rom_qrom(kb_or_null, &kc, gl->comp_table, gl->num_entries, gl->comp_words,
+                                            0u, rb, k_q, lut->key_bits, comp_q, qrom_anc, &cbit);
+                            qk_linf2_out_of_place(kb_or_null, &kc, comp_q, rb, out_q, gl->val_bits, gl->recon_rows, &gl->const_shift);
+                            if (!qk_hmr_parity_lut_uncompute(kb_or_null, &kc, gl->comp_table, gl->num_entries, gl->comp_words,
+                                                             0u, rb, k_q, lut->key_bits, comp_q, (uint32_t *)qrom_anc, &cbit)) {
+                                qk_lut_rom_qrom(kb_or_null, &kc, gl->comp_table, gl->num_entries, gl->comp_words,
+                                                0u, rb, k_q, lut->key_bits, comp_q, qrom_anc, &cbit);
+                            }
+                        } else {
+                            qk_lut_rom_qrom(kb_or_null, &kc, lut->table, lut->num_entries, lut->val_words,
+                                            0u, vb, k_q, lut->key_bits, out_q, st->temp_anc, &cbit);
+                        }
+                    } else if (dop->kind == QIR_OP_GF2M_MUL) {
+                        const uint32_t *da_q = plan->val_allocs[dop->ins[0]].qubits;
+                        const uint32_t *db_q = plan->val_allocs[dop->ins[1]].qubits;
+                        if (dop->u.gf2m.m == 12u && plan->has_gf12_r42) {
+                            qk_gf12_mul_r42_compute(kb_or_null, &kc, da_q, db_q, out_q, st->temp_anc[0], &cbit, &plan->gf12_r42);
+                        } else if (dop->u.gf2m.m == 6u && plan->has_gf64_r15) {
+                            qk_gf64_mul_r15_compute(kb_or_null, &kc, da_q, db_q, out_q, st->temp_anc[0], &cbit, &plan->gf64_r15);
+                        } else {
+                            uint16_t mdeg = dop->u.gf2m.m;
+                            uint32_t poly = dop->u.gf2m.irred_poly;
+                            for (uint16_t j = 0u; j < mdeg; ++j) {
+                                for (uint16_t i = 0u; i < mdeg; ++i) {
+                                    uint32_t shift_elem = UINT32_C(1) << i;
+                                    for (uint16_t s = 0u; s < j; ++s) {
+                                        shift_elem <<= 1u;
+                                        if (shift_elem & (UINT32_C(1) << mdeg)) shift_elem ^= poly;
+                                    }
+                                    uint32_t p = st->temp_anc[0];
+                                    qk_and_compute(kb_or_null, &kc, da_q[i], db_q[j], p);
+                                    for (uint16_t k = 0u; k < mdeg; ++k) {
+                                        if ((shift_elem >> k) & 1u) qk_cx(kb_or_null, &kc, p, out_q[k]);
+                                    }
+                                    qk_and_uncompute(kb_or_null, &kc, da_q[i], db_q[j], p, cbit++);
+                                }
+                            }
+                        }
+                    } else if (dop->kind == QIR_OP_LINF2) {
+                        const qir_linf2_payload_t *lf = &dop->u.linf2;
+                        const uint32_t *dq = plan->val_allocs[dop->ins[0]].qubits;
+                        qk_linf2_out_of_place(kb_or_null, &kc, dq, lf->in_bits, out_q, lf->out_bits, lf->rows, &lf->const_vec);
+                    }
+                    if (uncomp && !ip) {
+                        for (uint16_t b = 0u; b < out_w; ++b) qk_cx(kb_or_null, &kc, qk__q(acc_q, b), qk__q(out_q, b));
+                    }
+                    break;
+                }
+                if (st->variant == QIR_VAR_INPLACE_ARITH && st->inplace_on_in0 && st->inplace_in_idx < 2u) {
+                    const uint32_t *other_q = plan->val_allocs[op->ins[st->inplace_in_idx ^ 1u]].qubits;
+                    uint16_t deg = op->u.gf2m.m;
+                    for (uint16_t b = 0u; b < deg; ++b) qk_cx(kb_or_null, &kc, qk__q(other_q, b), qk__q(out_q, b));
+                    break;
+                }
                 uint16_t deg = op->u.gf2m.m;
                 for (uint16_t b = 0u; b < deg; ++b) {
                     qk_cx(kb_or_null, &kc, in0_q[b], out_q[b]);
@@ -551,6 +671,35 @@ static inline bool qir_codegen_or_count(
                 break;
             }
             case QIR_OP_GF2M_MUL: {
+                if (st->variant == QIR_VAR_GF2M_CONST_LINF2 && st->fused_linf2) {
+                    const qir_linf2_payload_t *lf = st->fused_linf2;
+                    uint32_t var_idx = st->aux_param & 1u;
+                    const uint32_t *vq = plan->val_allocs[op->ins[var_idx]].qubits;
+                    uint32_t dm = lf->out_bits;
+                    uint32_t c_idx = var_idx ^ 1u;
+                    uint32_t dmask = (dm == 32u) ? UINT32_MAX : ((UINT32_C(1) << dm) - 1u);
+                    uint32_t celem = (uint32_t)(m->vals[op->ins[c_idx]].const_val[0] & dmask);
+                    if (celem == 0u) break;
+                    if (st->inplace_on_in0 && st->inplace_in_idx == var_idx) {
+                        if (!uncomp) {
+                            qk_linf2_inplace(kb_or_null, &kc, vq, dm, lf->rows, NULL);
+                        } else {
+                            uint32_t cinv = qir__gf2m_inv_u32(celem, (uint16_t)dm, op->u.gf2m.irred_poly);
+                            qcc_bv256_t *inv_rows = (qcc_bv256_t *)calloc(dm ? dm : 1u, sizeof(qcc_bv256_t));
+                            for (uint32_t c = 0u; c < dm; ++c) {
+                                uint32_t col = qir__gf2m_mul_u32(cinv, UINT32_C(1) << c, (uint16_t)dm, op->u.gf2m.irred_poly);
+                                for (uint32_t r = 0u; r < dm; ++r) {
+                                    if ((col >> r) & 1u) qcc_bv_set(inv_rows[r].w, c);
+                                }
+                            }
+                            qk_linf2_inplace(kb_or_null, &kc, vq, dm, inv_rows, NULL);
+                            free(inv_rows);
+                        }
+                    } else {
+                        qk_linf2_out_of_place(kb_or_null, &kc, vq, lf->in_bits, out_q, dm, lf->rows, NULL);
+                    }
+                    break;
+                }
                 if (op->u.gf2m.m == 12u && plan->has_gf12_r42) {
                     if (!uncomp) {
                         qk_gf12_mul_r42_compute(kb_or_null, &kc, in0_q, in1_q, out_q, st->temp_anc[0], &cbit, &plan->gf12_r42);
@@ -585,11 +734,12 @@ static inline bool qir_codegen_or_count(
                 break;
             }
             case QIR_OP_GF2M_INV: {
+                uint32_t ctrl_q = (op->num_ins >= 2u && in1_q) ? qk__q(in1_q, 0u) : UINT32_MAX;
                 if (op->u.gf2m.m == 12u && plan->has_gf12_tower) {
                     if (!uncomp) {
-                        qk_gf12_inv_tower(kb_or_null, &kc, in0_q, out_q, st->temp_anc, &cbit, &plan->gf12_tower);
+                        qk_gf12_inv_tower(kb_or_null, &kc, in0_q, out_q, ctrl_q, st->temp_anc, &cbit, &plan->gf12_tower);
                     } else {
-                        qk_gf12_inv_tower_uncompute(kb_or_null, &kc, in0_q, out_q, st->temp_anc, &cbit, &plan->gf12_tower);
+                        qk_gf12_inv_tower_uncompute(kb_or_null, &kc, in0_q, out_q, ctrl_q, st->temp_anc, &cbit, &plan->gf12_tower);
                     }
                 } else {
                     /* Direct LUT for small field (e.g. deg <= 8) */
@@ -597,7 +747,16 @@ static inline bool qir_codegen_or_count(
                     uint32_t nent = UINT32_C(1) << deg;
                     uint64_t *tbl = (uint64_t *)calloc(nent, sizeof(uint64_t));
                     for (uint32_t a = 0u; a < nent; ++a) tbl[a] = qir__gf2m_inv_u32(a, deg, op->u.gf2m.irred_poly);
-                    qk_lut_rom_qrom(kb_or_null, &kc, tbl, nent, 1u, 0u, deg, in0_q, deg, out_q, st->temp_anc, &cbit);
+                    if (ctrl_q == UINT32_MAX) {
+                        qk_lut_rom_qrom(kb_or_null, &kc, tbl, nent, 1u, 0u, deg, in0_q, deg, out_q, st->temp_anc, &cbit);
+                    } else {
+                        const uint32_t *inv_tmp  = st->temp_anc;
+                        const uint32_t *qrom_anc = st->temp_anc ? (st->temp_anc + deg) : NULL;
+                        for (uint16_t b = 0u; b < deg; ++b) qk_r(kb_or_null, &kc, qk__q(inv_tmp, b));
+                        qk_lut_rom_qrom(kb_or_null, &kc, tbl, nent, 1u, 0u, deg, in0_q, deg, inv_tmp, qrom_anc, &cbit);
+                        for (uint16_t b = 0u; b < deg; ++b) qk_ccx(kb_or_null, &kc, ctrl_q, qk__q(inv_tmp, b), qk__q(out_q, b));
+                        qk_lut_rom_qrom(kb_or_null, &kc, tbl, nent, 1u, 0u, deg, in0_q, deg, inv_tmp, qrom_anc, &cbit);
+                    }
                     free(tbl);
                 }
                 break;
@@ -618,6 +777,21 @@ static inline bool qir_codegen_or_count(
                                     0u, vb, in0_q, lut->key_bits, out_q,
                                     st->aux_param ? st->aux_param : 1u,
                                     st->temp_anc, st->num_temp_anc, &cbit);
+                    break;
+                }
+                if (st->variant == QIR_VAR_QROAM_SPLIT) {
+                    uint32_t K = st->aux_param & 0xFFu;
+                    uint32_t b_sh = (st->aux_param >> 8u) & 0xFFu;
+                    if (K < 2u) K = 2u;
+                    if (b_sh == 0u) b_sh = 1u;
+                    uint32_t chunk = (vb + K - 1u) / K;
+                    if (chunk == 0u) chunk = 1u;
+                    for (uint32_t lo = 0u; lo < vb; lo += chunk) {
+                        uint32_t hi = (lo + chunk < vb) ? (lo + chunk) : vb;
+                        qk_qroam_vslot0(kb_or_null, &kc, lut->table, lut->num_entries, lut->val_words,
+                                        lo, hi, in0_q, lut->key_bits, out_q ? (out_q + lo) : NULL,
+                                        b_sh, st->temp_anc, st->num_temp_anc, &cbit);
+                    }
                     break;
                 }
                 if (st->variant == QIR_VAR_LIN_GAUGE_TSP && st->gauge_lut) {
@@ -662,6 +836,27 @@ static inline bool qir_codegen_or_count(
             }
             case QIR_OP_CTRL_SEL: {
                 uint32_t sel = qk__q(in0_q, 0u);
+                if (st->variant == QIR_VAR_CTRL_ADD_CUCCARO && st->num_chain_ops > 0u) {
+                    uint32_t lhs_vid = st->aux_param & UINT32_C(0x7FFFFFFF);
+                    bool is_sub = (st->aux_param >> 31u) != 0u;
+                    const uint32_t *lhs_q = plan->val_allocs[lhs_vid].qubits;
+                    uint16_t k_in = m->vals[lhs_vid].width;
+                    bool ip = st->inplace_on_in0 && (st->inplace_in_idx == 1u);
+                    if (!uncomp) {
+                        if (!ip) {
+                            for (uint16_t b = 0u; b < out_w; ++b) qk_cx(kb_or_null, &kc, qk__q(in1_q, b), qk__q(out_q, b));
+                        }
+                        if (!is_sub) qk_ctrl_iadd_cuccaro(kb_or_null, &kc, sel, lhs_q, k_in, out_q, out_w, st->temp_anc, &cbit);
+                        else         qk_ctrl_isub_cuccaro(kb_or_null, &kc, sel, lhs_q, k_in, out_q, out_w, st->temp_anc, &cbit);
+                    } else {
+                        if (!is_sub) qk_ctrl_isub_cuccaro(kb_or_null, &kc, sel, lhs_q, k_in, out_q, out_w, st->temp_anc, &cbit);
+                        else         qk_ctrl_iadd_cuccaro(kb_or_null, &kc, sel, lhs_q, k_in, out_q, out_w, st->temp_anc, &cbit);
+                        if (!ip) {
+                            for (uint16_t b = 0u; b < out_w; ++b) qk_cx(kb_or_null, &kc, qk__q(in1_q, b), qk__q(out_q, b));
+                        }
+                    }
+                    break;
+                }
                 for (uint16_t b = 0u; b < out_w; ++b) {
                     uint32_t q1 = qk__q(in1_q, b);
                     uint32_t q2 = qk__q(in2_q, b);
@@ -761,7 +956,50 @@ static inline bool qir_codegen_or_count(
                     const uint32_t *a_b   = (op->num_ins > 0u) ? plan->val_allocs[op->ins[0]].cbits : NULL;
                     const uint32_t *b_b   = (op->num_ins > 1u) ? plan->val_allocs[op->ins[1]].cbits : NULL;
                     const uint32_t *out_b = plan->val_allocs[op->outs[0]].cbits;
-                    qk_bit_op(kb_or_null, &kc, op->u.bit_op.mode, a_b, b_b, out_b, out_w);
+                    uint32_t bw = (op->u.bit_op.mode == 3u && op->num_ins > 0u) ? m->vals[op->ins[0]].width : out_w;
+                    qk_bit_op(kb_or_null, &kc, op->u.bit_op.mode, a_b, b_b, out_b, bw);
+                }
+                break;
+            }
+            case QIR_OP_SHL_VAR: {
+                if (op->num_outs > 0u && op->num_ins >= 2u) {
+                    const uint32_t *aux_q = plan->val_allocs[op->outs[0]].aux_qubits;
+                    qk_shl_var(kb_or_null, &kc,
+                               in0_q, m->vals[op->ins[0]].width,
+                               in1_q, m->vals[op->ins[1]].width,
+                               out_q, out_w, aux_q, op->u.shift.max_shift, uncomp);
+                }
+                break;
+            }
+            case QIR_OP_SHR_VAR: {
+                if (op->num_outs > 0u && op->num_ins >= 2u) {
+                    const uint32_t *aux_q = plan->val_allocs[op->outs[0]].aux_qubits;
+                    qk_shr_var(kb_or_null, &kc,
+                               in0_q, m->vals[op->ins[0]].width,
+                               in1_q, m->vals[op->ins[1]].width,
+                               out_q, out_w, aux_q, op->u.shift.max_shift, uncomp);
+                }
+                break;
+            }
+            case QIR_OP_EQ_ZERO: {
+                if (op->num_outs > 0u && op->num_ins >= 1u) {
+                    uint16_t iw = m->vals[op->ins[0]].width;
+                    if (!uncomp) qk_eq_zero_compute(kb_or_null, &kc, in0_q, iw, out_q, st->temp_anc, &cbit);
+                    else         qk_eq_zero_uncompute(kb_or_null, &kc, in0_q, iw, out_q, st->temp_anc, &cbit);
+                }
+                break;
+            }
+            case QIR_OP_PHASE_DOT: {
+                if (op->num_ins == 2u) {
+                    const uint32_t *cb = plan->val_allocs[op->ins[1]].cbits;
+                    qk_phase_dot(kb_or_null, &kc, in0_q, cb, m->vals[op->ins[0]].width);
+                } else if (op->num_ins >= 3u) {
+                    const uint32_t *cb = plan->val_allocs[op->ins[2]].cbits;
+                    qk_phase_dot_gf2m(kb_or_null, &kc, in0_q, in1_q, cb,
+                                      op->u.gf2m.m, op->u.gf2m.irred_poly,
+                                      plan->has_gf12_r42 ? &plan->gf12_r42 : NULL,
+                                      plan->has_gf64_r15 ? &plan->gf64_r15 : NULL,
+                                      &cbit);
                 }
                 break;
             }
@@ -850,6 +1088,7 @@ static inline bool qir_codegen_or_count(
         }
         if (cbit > max_b) max_b = cbit;
     }
+    free(folded_op);
 
     if (out_stats) {
         if (kb_or_null) {
@@ -883,19 +1122,33 @@ static inline bool qir_codegen_emit(const qir_phys_plan_t *plan, qcc_kmb_circuit
             char rname[64];
             snprintf(rname, sizeof(rname), "%s", m->vals[vid].name ? m->vals[vid].name : "in");
             qcc_kmb_add_quantum_reg(out_kmb, rname, va->qubits, va->width);
+        } else if (va->cwidth > 0u && va->cbits) {
+            char rname[64];
+            snprintf(rname, sizeof(rname), "%s", m->vals[vid].name ? m->vals[vid].name : "cin");
+            qcc_kmb_add_classical_reg(out_kmb, rname, va->cbits, va->cwidth);
         }
     }
     for (uint32_t i = 0u; i < m->num_outputs; ++i) {
         uint32_t vid = m->outputs[i];
         const qir_val_alloc_t *va = &plan->val_allocs[vid];
         if (va->width > 0u && va->qubits) {
+            const char *oname = m->vals[vid].name ? m->vals[vid].name : "out";
             bool same_as_in = false;
             for (uint32_t j = 0u; j < m->num_inputs; ++j) {
-                if (m->inputs[j] == vid) { same_as_in = true; break; }
+                uint32_t iv = m->inputs[j];
+                if (iv == vid) { same_as_in = true; break; }
+                const qir_val_alloc_t *iva = &plan->val_allocs[iv];
+                const char *iname = m->vals[iv].name ? m->vals[iv].name : "in";
+                if (iva->width == va->width && iva->qubits &&
+                    memcmp(iva->qubits, va->qubits, (size_t)va->width * sizeof(uint32_t)) == 0 &&
+                    strcmp(oname, iname) == 0) {
+                    same_as_in = true;
+                    break;
+                }
             }
             if (!same_as_in) {
                 char rname[64];
-                snprintf(rname, sizeof(rname), "%s", m->vals[vid].name ? m->vals[vid].name : "out");
+                snprintf(rname, sizeof(rname), "%s", oname);
                 qcc_kmb_add_quantum_reg(out_kmb, rname, va->qubits, va->width);
             }
         }
@@ -928,6 +1181,27 @@ static inline bool qir_codegen_emit(const qir_phys_plan_t *plan, qcc_kmb_circuit
                 (unsigned)actual.num_qubits, (unsigned long long)actual.toffoli,
                 (unsigned long long)actual.z_pow, (unsigned long long)actual.hmr);
         return false;
+    }
+
+    if (plan->emit_clean_reg && plan->clean_scratch_certified && actual.num_qubits > 0u) {
+        uint8_t *io_q = (uint8_t *)calloc(actual.num_qubits, 1u);
+        for (uint32_t r = 0u; r < out_kmb->num_regs; ++r) {
+            const qcc_kmb_reg_t *reg = &out_kmb->regs[r];
+            for (uint32_t k = 0u; k < reg->len; ++k) {
+                if ((reg->targets[k] & UINT32_C(0x80000000)) != 0u) {
+                    uint32_t qid = reg->targets[k] & UINT32_C(0x7FFFFFFF);
+                    if (qid < actual.num_qubits) io_q[qid] = 1u;
+                }
+            }
+        }
+        uint32_t *clean_qs = (uint32_t *)malloc(actual.num_qubits * sizeof(uint32_t));
+        uint32_t n_clean = 0u;
+        for (uint32_t q = 0u; q < actual.num_qubits; ++q) {
+            if (!io_q[q]) clean_qs[n_clean++] = q;
+        }
+        if (n_clean > 0u) qcc_kmb_add_quantum_reg(out_kmb, "@clean", clean_qs, n_clean);
+        free(io_q);
+        free(clean_qs);
     }
     return true;
 }

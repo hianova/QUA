@@ -57,7 +57,8 @@ static inline bool qir_print_module(const qir_module_t *m, FILE *f) {
 
         const char *kname = qir_op_kind_name(op->kind);
         if (op->kind == QIR_OP_BIT_OP) {
-            kname = (op->u.bit_op.mode == 0u) ? "bit_xor" : ((op->u.bit_op.mode == 1u) ? "bit_and" : "bit_not");
+            static const char *const bn[4] = {"bit_xor", "bit_and", "bit_not", "bit_or_reduce"};
+            kname = bn[op->u.bit_op.mode & 3u];
         }
         fprintf(f, "(%s", kname);
 
@@ -112,6 +113,10 @@ static inline bool qir_print_module(const qir_module_t *m, FILE *f) {
             } else if (op->kind == QIR_OP_GF2M_ADD) {
                 fprintf(f, " %u", (unsigned)op->u.gf2m.m);
             } else if (op->kind == QIR_OP_GF2M_MUL || op->kind == QIR_OP_GF2M_INV) {
+                fprintf(f, " %u 0x%x", (unsigned)op->u.gf2m.m, (unsigned)op->u.gf2m.irred_poly);
+            } else if (op->kind == QIR_OP_SHL_VAR || op->kind == QIR_OP_SHR_VAR) {
+                fprintf(f, " %u", (unsigned)op->u.shift.max_shift);
+            } else if (op->kind == QIR_OP_PHASE_DOT && op->num_ins == 3u) {
                 fprintf(f, " %u 0x%x", (unsigned)op->u.gf2m.m, (unsigned)op->u.gf2m.irred_poly);
             } else if (op->kind == QIR_OP_CLZ_NORM) {
                 fprintf(f, " %u", (unsigned)op->u.clz.mant_bits);
@@ -294,7 +299,8 @@ static inline bool qir__sym_get(const qir__symtab_t *st, const char *tok, uint32
 static inline bool qir_parse_str(qir_module_t *m, qcc_arena_t *arena, const char *src, size_t len) {
     qir_module_init(m, arena, "parsed");
     qir__lex_t L = {src, 0u, len};
-    qir__symtab_t sym = {0};
+    qir__symtab_t sym;
+    memset(&sym, 0, sizeof(sym));
     char tok[256];
 
     if (!qir__lex_expect(&L, '(')) goto fail;
@@ -317,9 +323,32 @@ static inline bool qir_parse_str(qir_module_t *m, qcc_arena_t *arena, const char
             uint16_t w = 0u;
             if (!qir__parse_width(wtok, &w)) goto fail;
             const char *clean = (vtok[0] == '%') ? (vtok + 1) : vtok;
-            uint32_t vid = qir_add_input(m, w, clean);
+            uint32_t vid = (wtok[0] == 'c')
+                ? qir_add_classical_input(m, w, clean)
+                : qir_add_input(m, w, clean);
             qir__sym_put(m, &sym, vtok, vid);
             if (!qir__lex_expect(&L, ')')) goto fail;
+        } else if (strcmp(tok, "phase_fn") == 0) {
+            char x_t[128], fn_t[64];
+            uint32_t ix = 0u;
+            if (!qir__lex_token(&L, x_t, sizeof(x_t)) || !qir__sym_get(&sym, x_t, &ix)) goto fail;
+            if (!qir__lex_token(&L, fn_t, sizeof(fn_t))) goto fail;
+            qir_phase_target_fn_t tfn = (strcmp(fn_t, "invsqrt") == 0) ? qir__builtin_invsqrt_ref : NULL;
+            if (!tfn) goto fail;
+            uint64_t x_min = 1u, x_max = 0u;
+            uint16_t k_mant = 8u, frac_bits = 37u, poly_bits = 28u;
+            while (qir__lex_peek(&L) == ':') {
+                char kw[32], val_s[64];
+                if (!qir__lex_token(&L, kw, sizeof(kw)) || !qir__lex_token(&L, val_s, sizeof(val_s))) goto fail;
+                if (strcmp(kw, ":min") == 0)       x_min = (uint64_t)strtoull(val_s, NULL, 0);
+                else if (strcmp(kw, ":max") == 0)  x_max = (uint64_t)strtoull(val_s, NULL, 0);
+                else if (strcmp(kw, ":seg") == 0 || strcmp(kw, ":k") == 0) k_mant = (uint16_t)strtoul(val_s, NULL, 0);
+                else if (strcmp(kw, ":frac") == 0) frac_bits = (uint16_t)strtoul(val_s, NULL, 0);
+                else if (strcmp(kw, ":poly") == 0) poly_bits = (uint16_t)strtoul(val_s, NULL, 0);
+                else goto fail;
+            }
+            if (!qir__lex_expect(&L, ')')) goto fail;
+            if (!qir_emit_dyadic_phase_fn(m, ix, x_min, x_max, k_mant, frac_bits, poly_bits, tfn, NULL)) goto fail;
         } else if (strcmp(tok, "output") == 0) {
             char vtok[128];
             if (!qir__lex_token(&L, vtok, sizeof(vtok))) goto fail;
@@ -445,13 +474,22 @@ static inline bool qir_parse_str(qir_module_t *m, qcc_arena_t *arena, const char
                                                (uint32_t)strtoul(p_s, NULL, 0),
                                                out_names[0] + (out_names[0][0] == '%'));
             } else if (strcmp(opname, "gf2m_inv") == 0) {
-                char a_t[128], deg_s[32], p_s[64];
-                uint32_t ia = 0u;
+                char a_t[128], b_or_deg[128], p_s[64];
+                uint32_t ia = 0u, ictrl = 0u;
                 if (!qir__lex_token(&L, a_t, sizeof(a_t)) || !qir__sym_get(&sym, a_t, &ia)) goto fail;
-                if (!qir__lex_token(&L, deg_s, sizeof(deg_s)) || !qir__lex_token(&L, p_s, sizeof(p_s))) goto fail;
-                out_ids[0] = qir_emit_gf2m_inv(m, ia, (uint16_t)strtoul(deg_s, NULL, 10),
-                                               (uint32_t)strtoul(p_s, NULL, 0),
-                                               out_names[0] + (out_names[0][0] == '%'));
+                if (!qir__lex_token(&L, b_or_deg, sizeof(b_or_deg))) goto fail;
+                if (qir__sym_get(&sym, b_or_deg, &ictrl)) {
+                    char deg_s[32];
+                    if (!qir__lex_token(&L, deg_s, sizeof(deg_s)) || !qir__lex_token(&L, p_s, sizeof(p_s))) goto fail;
+                    out_ids[0] = qir_emit_gf2m_inv_ctrl(m, ia, ictrl, (uint16_t)strtoul(deg_s, NULL, 10),
+                                                        (uint32_t)strtoul(p_s, NULL, 0),
+                                                        out_names[0] + (out_names[0][0] == '%'));
+                } else {
+                    if (!qir__lex_token(&L, p_s, sizeof(p_s))) goto fail;
+                    out_ids[0] = qir_emit_gf2m_inv(m, ia, (uint16_t)strtoul(b_or_deg, NULL, 10),
+                                                   (uint32_t)strtoul(p_s, NULL, 0),
+                                                   out_names[0] + (out_names[0][0] == '%'));
+                }
             } else if (strcmp(opname, "clz_norm") == 0) {
                 char a_t[128], mb_s[32];
                 uint32_t ia = 0u;
@@ -541,15 +579,52 @@ static inline bool qir_parse_str(qir_module_t *m, qcc_arena_t *arena, const char
                 uint32_t iq = 0u;
                 if (!qir__lex_token(&L, q_t, sizeof(q_t)) || !qir__sym_get(&sym, q_t, &iq)) goto fail;
                 out_ids[0] = qir_emit_hmr_meas(m, iq, out_names[0] + (out_names[0][0] == '%'));
-            } else if (strcmp(opname, "bit_xor") == 0 || strcmp(opname, "bit_and") == 0 || strcmp(opname, "bit_not") == 0) {
-                uint8_t mode = (strcmp(opname, "bit_xor") == 0) ? 0u : ((strcmp(opname, "bit_and") == 0) ? 1u : 2u);
+            } else if (strcmp(opname, "bit_xor") == 0 || strcmp(opname, "bit_and") == 0 ||
+                       strcmp(opname, "bit_not") == 0 || strcmp(opname, "bit_or_reduce") == 0) {
+                uint8_t mode = (strcmp(opname, "bit_xor") == 0) ? 0u :
+                               ((strcmp(opname, "bit_and") == 0) ? 1u :
+                                ((strcmp(opname, "bit_not") == 0) ? 2u : 3u));
                 char a_t[128], b_t[128];
                 uint32_t ia = 0u, ib = 0u;
                 if (!qir__lex_token(&L, a_t, sizeof(a_t)) || !qir__sym_get(&sym, a_t, &ia)) goto fail;
-                if (mode != 2u) {
+                if (mode == 0u || mode == 1u) {
                     if (!qir__lex_token(&L, b_t, sizeof(b_t)) || !qir__sym_get(&sym, b_t, &ib)) goto fail;
                 }
                 out_ids[0] = qir_emit_bit_op(m, mode, ia, ib, out_names[0] + (out_names[0][0] == '%'));
+            } else if (strcmp(opname, "shl_var") == 0 || strcmp(opname, "shr_var") == 0) {
+                char v_t[128], s_t[128], ms_s[32];
+                uint32_t iv = 0u, is = 0u;
+                if (!qir__lex_token(&L, v_t, sizeof(v_t)) || !qir__sym_get(&sym, v_t, &iv)) goto fail;
+                if (!qir__lex_token(&L, s_t, sizeof(s_t)) || !qir__sym_get(&sym, s_t, &is)) goto fail;
+                if (!qir__lex_token(&L, ms_s, sizeof(ms_s))) goto fail;
+                uint16_t ms = (uint16_t)strtoul(ms_s, NULL, 10);
+                const char *nm = out_names[0] + (out_names[0][0] == '%');
+                out_ids[0] = (strcmp(opname, "shl_var") == 0)
+                    ? qir_emit_shl_var(m, iv, is, out_widths[0], ms, nm)
+                    : qir_emit_shr_var(m, iv, is, out_widths[0], ms, nm);
+            } else if (strcmp(opname, "eq_zero") == 0) {
+                char v_t[128];
+                uint32_t iv = 0u;
+                if (!qir__lex_token(&L, v_t, sizeof(v_t)) || !qir__sym_get(&sym, v_t, &iv)) goto fail;
+                out_ids[0] = qir_emit_eq_zero(m, iv, out_names[0] + (out_names[0][0] == '%'));
+            } else if (strcmp(opname, "phase_dot") == 0) {
+                char t0[128], t1[128];
+                uint32_t i0 = 0u, i1 = 0u;
+                if (!qir__lex_token(&L, t0, sizeof(t0)) || !qir__sym_get(&sym, t0, &i0)) goto fail;
+                if (!qir__lex_token(&L, t1, sizeof(t1)) || !qir__sym_get(&sym, t1, &i1)) goto fail;
+                const char *nm = out_names[0] + (out_names[0][0] == '%');
+                char pk = qir__lex_peek(&L);
+                if (pk != ')' && pk != ':') {
+                    char t2[128], deg_s[32], p_s[64];
+                    uint32_t i2 = 0u;
+                    if (!qir__lex_token(&L, t2, sizeof(t2)) || !qir__sym_get(&sym, t2, &i2)) goto fail;
+                    if (!qir__lex_token(&L, deg_s, sizeof(deg_s)) || !qir__lex_token(&L, p_s, sizeof(p_s))) goto fail;
+                    out_ids[0] = qir_emit_phase_dot_gf2m(m, i0, i1, i2,
+                                                         (uint16_t)strtoul(deg_s, NULL, 10),
+                                                         (uint32_t)strtoul(p_s, NULL, 0), nm);
+                } else {
+                    out_ids[0] = qir_emit_phase_dot(m, i0, i1, nm);
+                }
             } else if (strcmp(opname, "approx_fn") == 0) {
                 char x_t[128];
                 uint32_t ix = 0u;

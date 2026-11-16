@@ -51,6 +51,10 @@ typedef enum {
     QIR_OP_OPAQUE_KMB,
     QIR_OP_HMR_MEAS,
     QIR_OP_BIT_OP,
+    QIR_OP_SHL_VAR,
+    QIR_OP_SHR_VAR,
+    QIR_OP_EQ_ZERO,
+    QIR_OP_PHASE_DOT,
     QIR_OP_COUNT
 } qir_op_kind_t;
 
@@ -141,8 +145,11 @@ typedef struct {
             uint16_t mant_bits;
         } clz;
         struct {
-            uint8_t mode; /* 0 = XOR, 1 = AND, 2 = NOT */
+            uint8_t mode; /* 0 = XOR, 1 = AND, 2 = NOT, 3 = OR_REDUCE */
         } bit_op;
+        struct {
+            uint16_t max_shift;
+        } shift;
         qir_phase_poly_payload_t phase_poly;
         qir_opaque_kmb_payload_t opaque;
     } u;
@@ -206,6 +213,10 @@ static inline const char *qir_op_kind_name(qir_op_kind_t k) {
         case QIR_OP_OPAQUE_KMB: return "opaque_kmb";
         case QIR_OP_HMR_MEAS:   return "hmr_meas";
         case QIR_OP_BIT_OP:     return "bit_op";
+        case QIR_OP_SHL_VAR:    return "shl_var";
+        case QIR_OP_SHR_VAR:    return "shr_var";
+        case QIR_OP_EQ_ZERO:    return "eq_zero";
+        case QIR_OP_PHASE_DOT:  return "phase_dot";
         default:                return "unknown";
     }
 }
@@ -254,6 +265,18 @@ static inline uint32_t qir__new_val(qir_module_t *m, uint16_t width, qir_rep_t r
 
 static inline uint32_t qir_add_input(qir_module_t *m, uint16_t width, const char *name) {
     uint32_t vid = qir__new_val(m, width, QIR_REP_STD, UINT32_MAX, name);
+    if (m->num_inputs >= m->cap_inputs) {
+        uint32_t nc = m->cap_inputs ? m->cap_inputs * 2u : 16u;
+        m->inputs = (uint32_t *)realloc(m->inputs, (size_t)nc * sizeof(uint32_t));
+        if (!m->inputs) abort();
+        m->cap_inputs = nc;
+    }
+    m->inputs[m->num_inputs++] = vid;
+    return vid;
+}
+
+static inline uint32_t qir_add_classical_input(qir_module_t *m, uint16_t width, const char *name) {
+    uint32_t vid = qir__new_val(m, width, QIR_REP_CLASSICAL, UINT32_MAX, name);
     if (m->num_inputs >= m->cap_inputs) {
         uint32_t nc = m->cap_inputs ? m->cap_inputs * 2u : 16u;
         m->inputs = (uint32_t *)realloc(m->inputs, (size_t)nc * sizeof(uint32_t));
@@ -611,13 +634,85 @@ static inline uint32_t qir_emit_hmr_meas(qir_module_t *m, uint32_t qval, const c
 static inline uint32_t qir_emit_bit_op(
     qir_module_t *m, uint8_t mode, uint32_t a, uint32_t b, const char *name
 ) {
-    uint16_t w = m->vals[a].width;
+    uint16_t w = (mode == 3u) ? 1u : m->vals[a].width;
     uint32_t ins[2] = {a, b};
-    uint16_t n_in = (mode == 2u) ? 1u : 2u;
-    if (mode != 2u && m->vals[b].width > w) w = m->vals[b].width;
+    uint16_t n_in = (mode == 2u || mode == 3u) ? 1u : 2u;
+    if (mode < 2u && m->vals[b].width > w) w = m->vals[b].width;
     qir_op_t *op = qir__new_op(m, QIR_OP_BIT_OP, ins, n_in, 0u);
     op->u.bit_op.mode = mode;
     uint32_t vid = qir__new_val(m, w, QIR_REP_CLASSICAL, op->id, name);
+    op->outs[0]  = vid;
+    op->num_outs = 1u;
+    return vid;
+}
+
+static inline uint32_t qir_emit_gf2m_inv_ctrl(
+    qir_module_t *m, uint32_t a, uint32_t ctrl_q, uint16_t deg, uint32_t irred_poly, const char *name
+) {
+    uint32_t ins[2] = {a, ctrl_q};
+    qir_op_t *op = qir__new_op(m, QIR_OP_GF2M_INV, ins, 2u, 0u);
+    op->u.gf2m.m          = deg;
+    op->u.gf2m.irred_poly = irred_poly;
+    uint32_t vid = qir__new_val(m, deg, QIR_REP_STD, op->id, name);
+    op->outs[0]  = vid;
+    op->num_outs = 1u;
+    return vid;
+}
+
+static inline uint32_t qir_emit_shl_var(
+    qir_module_t *m, uint32_t val, uint32_t shift_amt, uint16_t out_w, uint16_t max_shift, const char *name
+) {
+    uint32_t ins[2] = {val, shift_amt};
+    qir_op_t *op = qir__new_op(m, QIR_OP_SHL_VAR, ins, 2u, 0u);
+    op->u.shift.max_shift = max_shift;
+    uint32_t vid = qir__new_val(m, out_w, QIR_REP_STD, op->id, name);
+    op->outs[0]  = vid;
+    op->num_outs = 1u;
+    return vid;
+}
+
+static inline uint32_t qir_emit_shr_var(
+    qir_module_t *m, uint32_t val, uint32_t shift_amt, uint16_t out_w, uint16_t max_shift, const char *name
+) {
+    uint32_t ins[2] = {val, shift_amt};
+    qir_op_t *op = qir__new_op(m, QIR_OP_SHR_VAR, ins, 2u, 0u);
+    op->u.shift.max_shift = max_shift;
+    uint32_t vid = qir__new_val(m, out_w, QIR_REP_STD, op->id, name);
+    op->outs[0]  = vid;
+    op->num_outs = 1u;
+    return vid;
+}
+
+static inline uint32_t qir_emit_eq_zero(
+    qir_module_t *m, uint32_t val, const char *name
+) {
+    uint32_t ins[1] = {val};
+    qir_op_t *op = qir__new_op(m, QIR_OP_EQ_ZERO, ins, 1u, 0u);
+    uint32_t vid = qir__new_val(m, 1u, QIR_REP_STD, op->id, name);
+    op->outs[0]  = vid;
+    op->num_outs = 1u;
+    return vid;
+}
+
+static inline uint32_t qir_emit_phase_dot(
+    qir_module_t *m, uint32_t q_val, uint32_t c_val, const char *name
+) {
+    uint32_t ins[2] = {q_val, c_val};
+    qir_op_t *op = qir__new_op(m, QIR_OP_PHASE_DOT, ins, 2u, QIR_FLAG_PHASE_ONLY);
+    uint32_t vid = qir__new_val(m, 0u, QIR_REP_STD, op->id, name);
+    op->outs[0]  = vid;
+    op->num_outs = 1u;
+    return vid;
+}
+
+static inline uint32_t qir_emit_phase_dot_gf2m(
+    qir_module_t *m, uint32_t qa, uint32_t qb, uint32_t c_val, uint16_t deg, uint32_t irred_poly, const char *name
+) {
+    uint32_t ins[3] = {qa, qb, c_val};
+    qir_op_t *op = qir__new_op(m, QIR_OP_PHASE_DOT, ins, 3u, QIR_FLAG_PHASE_ONLY);
+    op->u.gf2m.m          = deg;
+    op->u.gf2m.irred_poly = irred_poly;
+    uint32_t vid = qir__new_val(m, 0u, QIR_REP_STD, op->id, name);
     op->outs[0]  = vid;
     op->num_outs = 1u;
     return vid;
@@ -805,6 +900,306 @@ static inline uint32_t qir_emit_approx_fn(
     return qir_emit_concat(m, oins, 2u, name);
 }
 
+typedef void (*qir_phase_target_fn_t)(uint64_t x, uint64_t *out_target_u64, uint64_t *out_tol_u64, void *ctx);
+
+static inline double qir__sqrt_newton_d(double v) {
+    if (v <= 0.0) return 0.0;
+    double x = (v >= 1.0) ? v : 1.0;
+    for (int i = 0; i < 40; ++i) {
+        double nxt = 0.5 * (x + v / x);
+        if (nxt == x) break;
+        x = nxt;
+    }
+    return x;
+}
+
+static inline uint64_t qir__isqrt_floor_u128(flow_u128 n) {
+    if (n == 0u) return 0u;
+    uint64_t hi = (uint64_t)(n >> 64u);
+    uint32_t msb = hi ? (64u + 63u - (uint32_t)__builtin_clzll((unsigned long long)hi))
+                      : (63u - (uint32_t)__builtin_clzll((unsigned long long)n));
+    uint32_t sh = (msb >> 1u) + 1u;
+    flow_u128 x = (sh >= 64u) ? (flow_u128)UINT64_MAX : ((flow_u128)1u << sh);
+    for (;;) {
+        flow_u128 nx = (x + n / x) >> 1u;
+        if (nx >= x) break;
+        x = nx;
+    }
+    return (uint64_t)x;
+}
+
+static inline void qir__builtin_invsqrt_ref(uint64_t x, uint64_t *out_target_u64, uint64_t *out_tol_u64, void *user_ctx) {
+    (void)user_ctx;
+    if (x == 1u) { *out_target_u64 = 0ULL; *out_tol_u64 = UINT64_C(1) << 40u; return; }
+    if (x == 2u) { *out_target_u64 = UINT64_C(13043817825332782212); *out_tol_u64 = UINT64_C(777472127993); return; }
+    if (x == 3u) { *out_target_u64 = UINT64_C(10650232656628343401); *out_tol_u64 = UINT64_C(634803334273); return; }
+    if (x == 4u) { *out_target_u64 = UINT64_C(1) << 63u; *out_tol_u64 = UINT64_C(1) << 39u; return; }
+    flow_u128 top  = ((flow_u128)1 << 66u);
+    flow_u128 q_hi = top / x;
+    flow_u128 rem  = top % x;
+    flow_u128 q128 = (q_hi << 64u) | ((rem << 64u) / x);
+    uint64_t r = qir__isqrt_floor_u128(q128);
+    *out_target_u64 = (r + 1ULL) >> 1u;
+    *out_tol_u64    = r >> 25u;
+}
+
+static inline void qir__solve_3x3_d(double A[3][3], const double b[3], double out_x[3]) {
+    double M[3][4];
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) M[r][c] = A[r][c];
+        M[r][3] = b[r];
+    }
+    for (int col = 0; col < 3; ++col) {
+        int piv = col;
+        double best = M[col][col] < 0.0 ? -M[col][col] : M[col][col];
+        for (int r = col + 1; r < 3; ++r) {
+            double v = M[r][col] < 0.0 ? -M[r][col] : M[r][col];
+            if (v > best) { best = v; piv = r; }
+        }
+        if (piv != col) {
+            for (int c = col; c < 4; ++c) { double t = M[col][c]; M[col][c] = M[piv][c]; M[piv][c] = t; }
+        }
+        double inv_p = (M[col][col] != 0.0) ? (1.0 / M[col][col]) : 0.0;
+        for (int c = col; c < 4; ++c) M[col][c] *= inv_p;
+        for (int r = 0; r < 3; ++r) {
+            if (r == col) continue;
+            double f = M[r][col];
+            for (int c = col; c < 4; ++c) M[r][c] -= f * M[col][c];
+        }
+    }
+    out_x[0] = M[0][3]; out_x[1] = M[1][3]; out_x[2] = M[2][3];
+}
+
+/* General Declarative Dyadic Piecewise Quadratic Phase-Oracle Builder */
+static inline bool qir_emit_dyadic_phase_fn(
+    qir_module_t *m,
+    uint32_t x_val,
+    uint64_t x_min,
+    uint64_t x_max,
+    uint16_t k_mant,
+    uint16_t frac_bits,
+    uint16_t poly_bits,
+    qir_phase_target_fn_t target_fn,
+    void *user_ctx
+) {
+    if (!m || x_val >= m->num_vals || frac_bits == 0u || frac_bits > 63u || poly_bits == 0u || poly_bits > 60u) return false;
+    uint16_t iw = m->vals[x_val].width;
+    if (iw < 4u || iw > 63u || k_mant < 1u || k_mant > 10u || k_mant >= iw) return false;
+    if (x_min == 0u) x_min = 1u;
+    uint64_t max_in = (UINT64_C(1) << iw) - 1u;
+    if (x_max == 0u || x_max > max_in) x_max = max_in;
+    if (x_min > x_max) return false;
+
+    uint16_t max_sh   = (uint16_t)((iw - 1u) >> 1u);
+    uint16_t c_scale  = (frac_bits > max_sh) ? (uint16_t)(frac_bits - max_sh) : 0u;
+    if (c_scale >= poly_bits) return false;
+    uint32_t n_charts = UINT32_C(1) << (k_mant + 1u);
+    uint64_t S        = UINT64_C(1) << k_mant;
+    uint16_t w_dx     = (uint16_t)((iw - 1u > k_mant) ? ((iw - 1u - k_mant > 14u) ? 14u : (iw - 1u - k_mant)) : 0u);
+    uint16_t w_dx2    = (w_dx > 8u) ? 8u : w_dx;
+    uint16_t sh_dx2   = (w_dx >= w_dx2) ? (uint16_t)(2u * w_dx - w_dx2) : 0u;
+    uint16_t sh1      = w_dx;
+    uint16_t sh2      = (uint16_t)(w_dx2 + 2u);
+    uint32_t guard    = 4u;
+    uint32_t minp_sq  = (sh_dx2 > guard) ? (sh_dx2 - guard) : 0u;
+    uint32_t minp_1   = (sh1 > guard) ? (sh1 - guard) : 0u;
+    uint64_t poly_msk = (UINT64_C(1) << poly_bits) - 1u;
+    uint64_t frac_msk = (UINT64_C(1) << frac_bits) - 1u;
+    uint64_t dx_msk   = w_dx ? ((UINT64_C(1) << w_dx) - 1u) : 0u;
+
+    uint64_t *c0_arr = (uint64_t *)calloc(n_charts, sizeof(uint64_t));
+    uint64_t *c1_arr = (uint64_t *)calloc(n_charts, sizeof(uint64_t));
+    uint64_t *c2_arr = (uint64_t *)calloc(n_charts, sizeof(uint64_t));
+    if (!c0_arr || !c1_arr || !c2_arr) abort();
+
+    static const double CHEB_U[3] = {
+        0.06698729810778067, 0.5, 0.9330127018922193
+    };
+    const double inv_sqrt2 = 0.70710678118654752440;
+    const double two_cscale = (double)(UINT64_C(1) << c_scale);
+
+    for (uint32_t e = 0u; e < n_charts; ++e) {
+        uint32_t p = e >> k_mant;
+        uint32_t s = e & (uint32_t)(S - 1u);
+        double scale = two_cscale * ((p == 0u) ? inv_sqrt2 : 1.0);
+        double A[3][3], b[3], sol[3];
+        for (int k = 0; k < 3; ++k) {
+            double u = CHEB_U[k];
+            double m_val = 1.0 + ((double)s + u) / (double)S;
+            double gv;
+            if (!target_fn || target_fn == qir__builtin_invsqrt_ref) {
+                gv = scale / qir__sqrt_newton_d(m_val);
+            } else {
+                uint64_t x_s = (uint64_t)(m_val * (double)(UINT64_C(1) << (iw - 1u - p)) + 0.5);
+                if (x_s < x_min) x_s = x_min;
+                if (x_s > x_max) x_s = x_max;
+                uint64_t tu = 0u, to = 0u;
+                target_fn(x_s, &tu, &to, user_ctx);
+                gv = ((double)tu / 18446744073709551616.0) * (double)(UINT64_C(1) << (frac_bits - (p >> 1u)));
+            }
+            A[k][0] = 1.0; A[k][1] = -u; A[k][2] = u * u;
+            b[k] = gv;
+        }
+        qir__solve_3x3_d(A, b, sol);
+        int64_t ic2 = (int64_t)(sol[2] * 4.0 + 0.5);
+        int64_t ic1 = (int64_t)(sol[1] + 0.5);
+        int64_t ic0 = (int64_t)(sol[0] + 0.5);
+        if (ic2 < 0) ic2 = 0;
+        if (ic1 < 0) ic1 = 0;
+        c2_arr[e] = (uint64_t)ic2;
+        c1_arr[e] = (uint64_t)ic1;
+        c0_arr[e] = (uint64_t)ic0 & poly_msk;
+    }
+
+    /* Coordinate minimax integer centering of c0_arr[e] over exact domain [x_min, x_max] */
+    double *min_dp = (double *)malloc(n_charts * sizeof(double));
+    double *max_dp = (double *)malloc(n_charts * sizeof(double));
+    double *sum_dp = (double *)calloc(n_charts, sizeof(double));
+    uint32_t *cnt_ch = (uint32_t *)calloc(n_charts, sizeof(uint32_t));
+    double *min_wt = (double *)malloc(n_charts * sizeof(double));
+    uint8_t *has_ch = (uint8_t *)calloc(n_charts, 1u);
+    if (!min_dp || !max_dp || !sum_dp || !cnt_ch || !min_wt || !has_ch) abort();
+    for (uint32_t e = 0u; e < n_charts; ++e) {
+        min_dp[e] = 1e30; max_dp[e] = -1e30; min_wt[e] = 1e30;
+    }
+
+    uint64_t span = x_max - x_min + 1u;
+    uint64_t step = (span <= 4194304u) ? 1u : (span / 2000000u + 1u);
+    for (uint64_t x = x_min; x <= x_max; x += step) {
+        uint32_t msb = 63u - (uint32_t)__builtin_clzll((unsigned long long)x);
+        uint32_t lz  = (iw - 1u) - msb;
+        uint32_t sh  = lz >> 1u;
+        uint32_t p   = lz & 1u;
+        uint64_t mant = x << lz;
+        uint32_t e   = (p << k_mant) | (uint32_t)((mant >> (iw - 1u - k_mant)) & (S - 1u));
+        uint64_t dx  = w_dx ? ((mant >> (iw - 1u - k_mant - w_dx)) & dx_msk) : 0u;
+
+        uint64_t dx2 = 0u;
+        for (uint16_t i = 0u; i < w_dx; ++i) {
+            if (((dx >> i) & 1u) == 0u) continue;
+            uint32_t pdiag = 2u * i;
+            if (pdiag >= minp_sq) dx2 += UINT64_C(1) << (pdiag - minp_sq);
+            for (uint16_t j = (uint16_t)(i + 1u); j < w_dx; ++j) {
+                if ((dx >> j) & 1u) {
+                    uint32_t pcross = (uint32_t)i + (uint32_t)j + 1u;
+                    if (pcross >= minp_sq) dx2 += UINT64_C(1) << (pcross - minp_sq);
+                }
+            }
+        }
+        dx2 >>= (sh_dx2 - minp_sq);
+        dx2 &= ((UINT64_C(1) << w_dx2) - 1u);
+
+        uint64_t c1v = c1_arr[e];
+        uint64_t t1  = 0u;
+        for (uint16_t i = 0u; i < w_dx; ++i) {
+            if (((dx >> i) & 1u) == 0u) continue;
+            uint32_t lo_c = (minp_1 > i) ? (minp_1 - i) : 0u;
+            t1 += ((c1v >> lo_c) << (lo_c + i - minp_1));
+        }
+        t1 >>= (sh1 - minp_1);
+
+        uint64_t t2   = (c2_arr[e] * dx2) >> sh2;
+        uint64_t poly = (c0_arr[e] - t1 + t2) & poly_msk;
+        uint64_t ph_u = ((poly << sh) & frac_msk) << (64u - frac_bits);
+        uint64_t targ = 0u, tol = 1u;
+        if (!target_fn) qir__builtin_invsqrt_ref(x, &targ, &tol, NULL);
+        else            target_fn(x, &targ, &tol, user_ctx);
+
+        int64_t sdiff = (int64_t)(ph_u - targ);
+        double unit_scale = (double)(UINT64_C(1) << (64u - frac_bits + sh));
+        double dp = (double)sdiff / unit_scale;
+        double wt = (double)tol / unit_scale;
+        has_ch[e] = 1u;
+        if (dp < min_dp[e]) min_dp[e] = dp;
+        if (dp > max_dp[e]) max_dp[e] = dp;
+        if (wt < min_wt[e]) min_wt[e] = wt;
+        sum_dp[e] += dp;
+        cnt_ch[e]++;
+    }
+    for (uint32_t e = 0u; e < n_charts; ++e) {
+        if (!has_ch[e]) continue;
+        double mid = 0.5 * (min_dp[e] + max_dp[e]);
+        int64_t delta = (mid >= 0.0) ? (int64_t)(mid + 0.5) : -(int64_t)(-mid + 0.5);
+        int64_t best_d = delta;
+        double best_r = 1e30;
+        for (int64_t cand_d = delta - 2; cand_d <= delta + 2; ++cand_d) {
+            double e0 = min_dp[e] - (double)cand_d; if (e0 < 0.0) e0 = -e0;
+            double e1 = max_dp[e] - (double)cand_d; if (e1 < 0.0) e1 = -e1;
+            double mx = (e0 > e1) ? e0 : e1;
+            double r = (min_wt[e] > 0.0) ? (mx / min_wt[e]) : mx;
+            if (r < best_r) { best_r = r; best_d = cand_d; }
+        }
+        c0_arr[e] = (uint64_t)((int64_t)c0_arr[e] - best_d) & poly_msk;
+    }
+    free(min_dp); free(max_dp); free(sum_dp); free(cnt_ch); free(min_wt); free(has_ch);
+
+    uint64_t max_c1 = 1u, max_c2 = 0u;
+    for (uint32_t e = 0u; e < n_charts; ++e) {
+        if (c1_arr[e] > max_c1) max_c1 = c1_arr[e];
+        if (c2_arr[e] > max_c2) max_c2 = c2_arr[e];
+    }
+    uint16_t w_c1 = qir__bit_width_u64(max_c1);
+    uint16_t w_c2 = max_c2 ? qir__bit_width_u64(max_c2) : 0u;
+    uint16_t w_t1 = qir__bit_width_u64((max_c1 * (dx_msk ? dx_msk : 1u)) >> sh1);
+    if (w_t1 > poly_bits) w_t1 = poly_bits;
+    uint64_t max_dx2 = w_dx2 ? ((UINT64_C(1) << w_dx2) - 1u) : 0u;
+    uint16_t w_t2 = max_c2 ? qir__bit_width_u64((max_c2 * (max_dx2 ? max_dx2 : 1u)) >> sh2) : 0u;
+    if (w_t2 > poly_bits) w_t2 = poly_bits;
+
+    uint32_t mant = 0u, clz = 0u;
+    qir_emit_clz_norm(m, x_val, iw, &mant, &clz, "dp_mant", "dp_clz");
+    uint16_t clz_w = m->vals[clz].width;
+    uint32_t clz_lsb  = qir_emit_slice(m, clz, 0u, 1u, "dp_p");
+    uint32_t clz_half = (clz_w > 1u) ? qir_emit_slice(m, clz, 1u, clz_w, "dp_sh")
+                                     : qir_emit_const_u64(m, 1u, 0u, "dp_sh0");
+    uint32_t seg = qir_emit_slice(m, mant, (uint16_t)(iw - 1u - k_mant), (uint16_t)(iw - 1u), "dp_seg");
+    uint32_t kins[2] = {seg, clz_lsb};
+    uint32_t key = qir_emit_concat(m, kins, 2u, "dp_key");
+
+    uint32_t dx = (w_dx > 0u)
+        ? qir_emit_slice(m, mant, (uint16_t)(iw - 1u - k_mant - w_dx), (uint16_t)(iw - 1u - k_mant), "dp_dx")
+        : qir_emit_const_u64(m, 1u, 0u, "dp_dx0");
+
+    uint32_t t2 = UINT32_MAX;
+    if (w_dx2 > 0u && w_c2 > 0u && w_t2 > 0u) {
+        uint32_t dx2 = qir_emit_sqr_fxp(m, dx, w_dx2, w_dx, w_dx2, QIR_FLAG_APPROX, "dp_dx2");
+        m->ops[m->vals[dx2].def_op].approx_tol_q16 = (guard << 16u);
+        m->ops[m->vals[dx2].def_op].u.mul.keep_exact = 2u;
+        uint32_t c2_v = qir_emit_lut_rom(m, key, w_c2, n_charts, c2_arr, 0u, "dp_c2");
+        t2 = qir_emit_mul_fxp(m, c2_v, dx2, w_t2, sh2, 0u, 0u, 0u, "dp_t2");
+    }
+
+    uint32_t c1_v = qir_emit_lut_rom(m, key, w_c1, n_charts, c1_arr, 0u, "dp_c1");
+    uint32_t t1 = qir_emit_mul_fxp(m, c1_v, dx, w_t1, sh1, 0u, 0u, QIR_FLAG_APPROX, "dp_t1");
+    m->ops[m->vals[t1].def_op].approx_tol_q16 = (guard << 16u);
+    m->ops[m->vals[t1].def_op].u.mul.keep_exact = 2u;
+
+    uint32_t c0_v = qir_emit_lut_rom(m, key, poly_bits, n_charts, c0_arr, 0u, "dp_c0");
+    uint32_t diff = qir_emit_sub(m, c0_v, t1, 0u, "dp_diff");
+    m->vals[diff].width = poly_bits;
+    uint32_t poly = diff;
+    if (t2 != UINT32_MAX) {
+        poly = qir_emit_add(m, diff, t2, 0u, "dp_poly");
+        m->vals[poly].width = poly_bits;
+    }
+
+    uint32_t shifted = qir_emit_shl_var(m, poly, clz_half, frac_bits, max_sh, "dp_shifted");
+    qir_phase_term_t *terms = (qir_phase_term_t *)calloc(frac_bits, sizeof(qir_phase_term_t));
+    if (!terms) abort();
+    for (uint16_t b = 0u; b < frac_bits; ++b) {
+        qcc_bv_set(terms[b].mask, b);
+        terms[b].is_xor = 0u;
+        uint32_t exp_b = (uint32_t)(128u - frac_bits + b);
+        terms[b].angle = (exp_b < 128u) ? ((flow_u128)1u << exp_b) : 0u;
+    }
+    (void)qir_emit_phase_poly(m, &shifted, 1u, terms, frac_bits, "dp_phase");
+    m->require_clean_scratch = true;
+
+    free(terms);
+    free(c0_arr); free(c1_arr); free(c2_arr);
+    return true;
+}
+
 /* ============================================================================
  * Bit-Sliced 64-Lane Helpers & Abstract Interpretation (zero_mask propagation)
  * ============================================================================ */
@@ -889,7 +1284,27 @@ static inline void qir__u256_mul_shift(
     for (uint32_t i = 0u; i < QIR_WORDS; ++i) out[i] &= m.w[i];
 }
 
+static inline uint32_t qir__gf8_mul_0xB(uint32_t a, uint32_t b) {
+    uint32_t res = 0u;
+    a &= 7u;
+    b &= 7u;
+    for (uint32_t i = 0u; i < 3u; ++i) {
+        if ((b >> i) & 1u) res ^= a;
+        a <<= 1u;
+        if (a & 8u) a ^= 0xBu;
+    }
+    return res & 7u;
+}
+
 static inline uint32_t qir__gf2m_mul_u32(uint32_t a, uint32_t b, uint16_t deg, uint32_t irred_poly) {
+    if (deg == 6u && irred_poly == 0u) {
+        uint32_t x0 = a & 7u, x1 = (a >> 3u) & 7u;
+        uint32_t y0 = b & 7u, y1 = (b >> 3u) & 7u;
+        uint32_t p0 = qir__gf8_mul_0xB(x0, y0);
+        uint32_t p1 = qir__gf8_mul_0xB(x1, y1);
+        uint32_t pm = qir__gf8_mul_0xB(x0 ^ x1, y0 ^ y1);
+        return (p0 ^ p1) | ((pm ^ p0) << 3u);
+    }
     uint32_t res = 0u;
     uint32_t top = UINT32_C(1) << deg;
     uint32_t mask = top - 1u;
@@ -1074,6 +1489,40 @@ static inline void qir_recompute_zero_masks(qir_module_t *m) {
                     zm[w] = (~or_w[w]) & mask.w[w];
                     cm[w] = zm[w] | (and_w[w] & mask.w[w]);
                     cv[w] = and_w[w] & mask.w[w];
+                }
+                break;
+            }
+            case QIR_OP_SHL_VAR: {
+                const qir_val_t *iv = &m->vals[op->ins[0]];
+                uint16_t top_b = (uint16_t)(iv->width + op->u.shift.max_shift);
+                for (uint16_t b = top_b; b < ov->width; ++b) {
+                    qcc_bv_set(zm, b);
+                    qcc_bv_set(cm, b);
+                }
+                break;
+            }
+            case QIR_OP_SHR_VAR: {
+                const qir_val_t *iv = &m->vals[op->ins[0]];
+                uint16_t hi_nz = iv->width;
+                while (hi_nz > 0u && qcc_bv_get(iv->zero_mask, hi_nz - 1u)) hi_nz--;
+                for (uint16_t b = hi_nz; b < ov->width; ++b) {
+                    qcc_bv_set(zm, b);
+                    qcc_bv_set(cm, b);
+                }
+                break;
+            }
+            case QIR_OP_GF2M_INV: {
+                const qir_val_t *a = &m->vals[op->ins[0]];
+                bool a_zero = true;
+                for (uint16_t b = 0u; b < a->width; ++b) {
+                    if (!qcc_bv_get(a->zero_mask, b)) { a_zero = false; break; }
+                }
+                bool ctrl_zero = (op->num_ins >= 2u && qcc_bv_get(m->vals[op->ins[1]].zero_mask, 0u));
+                if (a_zero || ctrl_zero) {
+                    for (uint32_t w = 0u; w < QIR_WORDS; ++w) {
+                        zm[w] = mask.w[w];
+                        cm[w] = mask.w[w];
+                    }
                 }
                 break;
             }
@@ -1305,11 +1754,16 @@ static inline bool qir_eval_64(
             }
             case QIR_OP_GF2M_INV: {
                 const qir_val_vec64_t *a = &vecs[op->ins[0]];
+                const qir_val_vec64_t *ctrl = (op->num_ins >= 2u) ? &vecs[op->ins[1]] : NULL;
                 qir_val_vec64_t *dst = &vecs[op->outs[0]];
                 uint16_t deg = op->u.gf2m.m;
                 uint32_t poly = op->u.gf2m.irred_poly;
                 for (uint32_t l = 0u; l < 64u; ++l) {
-                    dst->lanes[l][0] = qir__gf2m_inv_u32((uint32_t)a->lanes[l][0], deg, poly);
+                    if (ctrl && ((ctrl->lanes[l][0] & 1u) == 0u)) {
+                        dst->lanes[l][0] = 0u;
+                    } else {
+                        dst->lanes[l][0] = qir__gf2m_inv_u32((uint32_t)a->lanes[l][0], deg, poly);
+                    }
                 }
                 break;
             }
@@ -1552,11 +2006,79 @@ static inline bool qir_eval_64(
                 qcc_bv256_t mask = qcc_bv_mask_n(m->vals[op->outs[0]].width);
                 uint8_t mode = op->u.bit_op.mode;
                 for (uint32_t l = 0u; l < 64u; ++l) {
-                    for (uint32_t w = 0u; w < QIR_WORDS; ++w) {
-                        uint64_t av = a->lanes[l][w], bv = b ? b->lanes[l][w] : 0u;
-                        uint64_t rv = (mode == 0u) ? (av ^ bv) : ((mode == 1u) ? (av & bv) : (~av));
-                        dst->lanes[l][w] = rv & mask.w[w];
+                    if (mode == 3u) {
+                        uint64_t any = 0u;
+                        for (uint32_t w = 0u; w < QIR_WORDS; ++w) any |= a->lanes[l][w];
+                        dst->lanes[l][0] = any ? 1u : 0u;
+                    } else {
+                        for (uint32_t w = 0u; w < QIR_WORDS; ++w) {
+                            uint64_t av = a->lanes[l][w], bv = b ? b->lanes[l][w] : 0u;
+                            uint64_t rv = (mode == 0u) ? (av ^ bv) : ((mode == 1u) ? (av & bv) : (~av));
+                            dst->lanes[l][w] = rv & mask.w[w];
+                        }
                     }
+                }
+                break;
+            }
+            case QIR_OP_SHL_VAR: {
+                const qir_val_vec64_t *val = &vecs[op->ins[0]];
+                const qir_val_vec64_t *sh  = &vecs[op->ins[1]];
+                qir_val_vec64_t *dst = &vecs[op->outs[0]];
+                uint16_t iw = m->vals[op->ins[0]].width;
+                uint16_t ow = m->vals[op->outs[0]].width;
+                for (uint32_t l = 0u; l < 64u; ++l) {
+                    memset(dst->lanes[l], 0, sizeof(dst->lanes[l]));
+                    uint64_t amt = sh->lanes[l][0];
+                    for (uint16_t b = 0u; b < iw; ++b) {
+                        if (qcc_bv_get(val->lanes[l], b) && amt + b < ow) {
+                            qcc_bv_set(dst->lanes[l], (uint32_t)(amt + b));
+                        }
+                    }
+                }
+                break;
+            }
+            case QIR_OP_SHR_VAR: {
+                const qir_val_vec64_t *val = &vecs[op->ins[0]];
+                const qir_val_vec64_t *sh  = &vecs[op->ins[1]];
+                qir_val_vec64_t *dst = &vecs[op->outs[0]];
+                uint16_t iw = m->vals[op->ins[0]].width;
+                uint16_t ow = m->vals[op->outs[0]].width;
+                for (uint32_t l = 0u; l < 64u; ++l) {
+                    memset(dst->lanes[l], 0, sizeof(dst->lanes[l]));
+                    uint64_t amt = sh->lanes[l][0];
+                    for (uint16_t b = 0u; b < ow; ++b) {
+                        if (amt + b < iw && qcc_bv_get(val->lanes[l], (uint32_t)(amt + b))) {
+                            qcc_bv_set(dst->lanes[l], b);
+                        }
+                    }
+                }
+                break;
+            }
+            case QIR_OP_EQ_ZERO: {
+                const qir_val_vec64_t *a = &vecs[op->ins[0]];
+                qir_val_vec64_t *dst = &vecs[op->outs[0]];
+                for (uint32_t l = 0u; l < 64u; ++l) {
+                    uint64_t any = 0u;
+                    for (uint32_t w = 0u; w < QIR_WORDS; ++w) any |= a->lanes[l][w];
+                    dst->lanes[l][0] = any ? 0u : 1u;
+                }
+                break;
+            }
+            case QIR_OP_PHASE_DOT: {
+                for (uint32_t l = 0u; l < 64u; ++l) {
+                    if (((pred_mask >> l) & 1u) == 0u) continue;
+                    uint32_t par = 0u;
+                    if (op->num_ins == 2u) {
+                        for (uint32_t w = 0u; w < QIR_WORDS; ++w) {
+                            par ^= (uint32_t)__builtin_popcountll((unsigned long long)(vecs[op->ins[0]].lanes[l][w] & vecs[op->ins[1]].lanes[l][w]));
+                        }
+                    } else if (op->num_ins >= 3u) {
+                        uint32_t p = qir__gf2m_mul_u32((uint32_t)vecs[op->ins[0]].lanes[l][0],
+                                                       (uint32_t)vecs[op->ins[1]].lanes[l][0],
+                                                       op->u.gf2m.m, op->u.gf2m.irred_poly);
+                        par = (uint32_t)__builtin_popcount((unsigned)(p & (uint32_t)vecs[op->ins[2]].lanes[l][0]));
+                    }
+                    if (par & 1u) phase[l] += ((flow_u128)1u << 127u);
                 }
                 break;
             }

@@ -6,7 +6,7 @@ QCC_DIR  ?= ../qcc
 
 CC       := cc
 CXX      := c++
-CFLAGS   := -std=c17 -O3 -Wall -Wextra -Werror -mcpu=native -I.. -I$(FLOW_DIR) -Isrc
+CFLAGS   := -std=c17 -O3 -Wall -Wextra -Werror -mcpu=native -I.. -I$(FLOW_DIR) -I$(QCC_DIR) -Isrc
 CXXFLAGS := -std=c++20 -O3 -fno-strict-aliasing -mcpu=native
 PYTHON   := ./.venv/bin/python
 PYTEST   := ./.venv/bin/pytest
@@ -28,7 +28,7 @@ all: build-synth build-bootstrap test
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-build-synth: $(BUILD_DIR) src/qua_synth.c src/qua_kmb.h src/qua_ele.h src/qua_bitop.h src/qua_invsqrt.h src/qua_dqi.h src/qua_dfthcsos.h $(QCC_DIR)/qcc_kmb.h $(QCC_DIR)/qcc_arena.h $(FLOW_DIR)/flow.h $(FLOW_DIR)/searu.h $(FLOW_DIR)/flow_opt_params.h
+build-synth: $(BUILD_DIR) src/qua_synth.c $(wildcard $(QCC_DIR)/qir*.h) $(wildcard $(QCC_DIR)/qcc_*.h) $(FLOW_DIR)/flow.h $(FLOW_DIR)/searu.h $(FLOW_DIR)/flow_opt_params.h
 	$(CC) $(CFLAGS) src/qua_synth.c -o $(BUILD_DIR)/qua_synth
 
 build-bootstrap: $(BUILD_DIR) dfthcsos_opt/dft_bootstrap.c $(FLOW_DIR)/flow.h $(FLOW_DIR)/searu.h $(FLOW_DIR)/flow_opt_params.h
@@ -52,6 +52,7 @@ test: build-synth
 verify-qcc: build-synth
 	$(MAKE) -C $(QCC_DIR) FLOW_DIR=$(abspath $(FLOW_DIR)) all test examples
 	$(PYTHON) scripts/verify_harness.py --kmb $(QCC_DIR)/build/adder_csa_phase.kmb $(QCC_DIR)/build/invsqrt_poly.kmb $(QCC_DIR)/build/gf12_arith.kmb $(QCC_DIR)/build/wide_lut_cap.kmb $(QCC_DIR)/build/invsqrt_phase_oracle.kmb
+	./$(BUILD_DIR)/qua_synth $(BUILD_DIR) selftest
 	$(QCC_DIR)/build/qcc verify $(BUILD_DIR)/selftest_adder16.kmb
 	$(QCC_DIR)/build/qcc verify $(BUILD_DIR)/selftest_gf2_12_mul.kmb
 	$(QCC_DIR)/build/qcc verify $(BUILD_DIR)/selftest_linf2.kmb
@@ -79,7 +80,11 @@ stage-sync:
 	mkdir -p $(STAGE_DIR)/dfthcsos
 	rm -f $(STAGE_DIR)/dfthcsos/angle_k_*.kmb $(STAGE_DIR)/dfthcsos/angle_k_*.kmx
 	ln -sf $(abspath $(BUILD_DIR)/invsqrt.kmb) $(STAGE_DIR)/invsqrt.kmb
-	ln -sf $(abspath $(BUILD_DIR)/dqi.kmb) $(STAGE_DIR)/dqi.kmb
+	if [ -f $(BUILD_DIR)/dqi.kmb ]; then \
+		ln -sf $(abspath $(BUILD_DIR)/dqi.kmb) $(STAGE_DIR)/dqi.kmb; \
+	elif [ ! -e $(STAGE_DIR)/dqi.kmb ] && [ -f $(BASELINE_DIR)/dqi.kmb ]; then \
+		ln -sf $(abspath $(BASELINE_DIR)/dqi.kmb) $(STAGE_DIR)/dqi.kmb; \
+	fi
 	ln -sf $(abspath $(BUILD_DIR)/dfthcsos/submission.npz) $(STAGE_DIR)/dfthcsos/submission.npz
 	for f in $(abspath $(BUILD_DIR)/dfthcsos)/angle_k_*.kmb; do ln -sf "$$f" $(STAGE_DIR)/dfthcsos/$$(basename "$$f"); done
 
@@ -93,4 +98,4 @@ pack:
 	$(PYTHON) scripts/verify_harness.py --pack $(STAGE_DIR) $(SUB_DIR)/submission.zip
 
 clean:
-	rm -rf $(BUILD_DIR)/*.o $(BUILD_DIR)/qua_synth $(BUILD_DIR)/selftest_*.kmb
+	rm -rf $(BUILD_DIR)/*.o $(BUILD_DIR)/qua_synth $(BUILD_DIR)/dft_bootstrap $(BUILD_DIR)/selftest_*.kmb $(BUILD_DIR)/invsqrt.kmb $(BUILD_DIR)/dfthcsos/angle_k_*.kmb

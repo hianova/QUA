@@ -31,6 +31,11 @@ typedef enum {
     QIR_VAR_QROAM_VSLOT0,          /* R8: Virtual-Slot-0 Differential Select-Swap QROAM */
     QIR_VAR_MUL_CONST_ADD,         /* R9: Shift-add constant multiplier (0 qubits for constant) */
     QIR_VAR_SQR_TRIANGLE,          /* R9: Disjoint-control diagonal+triangle squarer (0 copy Q) */
+    QIR_VAR_QROAM_SPLIT,           /* R8b: Column-split Virtual-Slot-0 QROAM */
+    QIR_VAR_INPLACE_ARITH,         /* R10a: In-place accumulator on ADD/SUB/GF2M_ADD */
+    QIR_VAR_CTRL_ADD_CUCCARO,      /* R10b: Controlled +/- via Cuccaro 1-ancilla adder */
+    QIR_VAR_XOR_ACCUM,             /* R10c: Fused out ^= op(...) zero-copy accumulator */
+    QIR_VAR_GF2M_CONST_LINF2,      /* R11: Constant GF(2^m) multiply folded into GL_m(F_2) CX */
     QIR_VAR_KIND_COUNT
 } qir_variant_kind_t;
 
@@ -106,7 +111,7 @@ typedef struct {
     qir_enode_t        *enodes;
     uint32_t            num_enodes;
     uint32_t            cap_enodes;
-    uint32_t            rules_fired[10]; /* Counts per rule R1..R9 */
+    uint32_t            rules_fired[16]; /* Counts per rule R1..R15 */
 } qir_egraph_t;
 
 /* ============================================================================
@@ -134,8 +139,7 @@ static inline uint8_t qir__gf8_mul(uint8_t a, uint8_t b) {
 static inline uint8_t qir__gf8_inv(uint8_t a) {
     uint8_t a2 = qir__gf8_mul(a, a);
     uint8_t a3 = qir__gf8_mul(a2, a);
-    uint8_t a6 = qir__gf8_mul(a3, a3);
-    return qir__gf8_mul(a6, a2);
+    return qir__gf8_mul(a3, a3); /* a^6 = a^{-1} in GF(8) */
 }
 
 static inline uint32_t qir__hamming_dist_u32(uint32_t a, uint32_t b) {
@@ -537,59 +541,68 @@ static inline qir_gauge_lut_t *qir__build_gauge_lut(qcc_arena_t *arena, const qi
         }
     }
 
-    /* If val_bits <= 64, run exact F_2 column RREF on (T[e] ^ T[0]) to find minimal rank basis! */
-    if (lut->val_bits <= 64u) {
-        uint64_t *basis_vecs = (uint64_t *)calloc(lut->val_bits, sizeof(uint64_t));
-        uint64_t *orig_vecs  = (uint64_t *)calloc(lut->val_bits, sizeof(uint64_t));
+    /* Run exact F_2 RREF on (T[e] ^ T[0]) over arbitrary <= 256 bits to find minimal rank basis! */
+    {
+        qcc_bv256_t *basis_vecs = (qcc_bv256_t *)calloc(lut->val_bits, sizeof(qcc_bv256_t));
+        uint16_t *true_piv_bits = (uint16_t *)calloc(lut->val_bits, sizeof(uint16_t));
         uint16_t true_rank = 0u;
-        uint16_t true_piv_bits[64];
-        /* For each row e, reduce against already-chosen pivot columns! Wait: transpose columns vs rows:
-         * Vector in F_2^{val_bits}: v_e = T[e] ^ T[0]. A pivot bit p_r gives an independent basis vector v_{e_r}
-         * so v_e = sum_r coeff_r(e) * v_{e_r}! Let's store basis_vecs[r] = v_{e_r} and recon_rows[bit]! */
+        uint16_t vw = lut->val_words;
         for (uint32_t e = 1u; e < lut->num_entries && true_rank < lut->val_bits; ++e) {
-            uint64_t v = lut->table[e] ^ g->const_shift.w[0];
-            uint64_t rem = v;
-            for (uint16_t r = 0u; r < true_rank; ++r) {
-                if ((rem >> true_piv_bits[r]) & 1u) rem ^= basis_vecs[r];
+            qcc_bv256_t rem;
+            memset(&rem, 0, sizeof(rem));
+            for (uint16_t w = 0u; w < vw && w < QIR_WORDS; ++w) {
+                rem.w[w] = lut->table[(size_t)e * vw + w] ^ g->const_shift.w[w];
             }
-            if (rem != 0u) {
-                uint16_t pbit = (uint16_t)__builtin_ctzll((unsigned long long)rem);
-                /* Zero out pbit in previous basis_vecs (RREF) */
-                for (uint16_t r = 0u; r < true_rank; ++r) {
-                    if ((basis_vecs[r] >> pbit) & 1u) basis_vecs[r] ^= rem;
+            for (uint16_t r = 0u; r < true_rank; ++r) {
+                if (qcc_bv_get(rem.w, true_piv_bits[r])) {
+                    for (uint16_t w = 0u; w < vw && w < QIR_WORDS; ++w) rem.w[w] ^= basis_vecs[r].w[w];
                 }
-                basis_vecs[true_rank]     = rem;
-                orig_vecs[true_rank]      = v;
-                true_piv_bits[true_rank]  = pbit;
+            }
+            uint16_t pbit = UINT16_MAX;
+            for (uint16_t w = 0u; w < vw && w < QIR_WORDS; ++w) {
+                if (rem.w[w] != 0u) {
+                    pbit = (uint16_t)(w * 64u + (uint16_t)__builtin_ctzll((unsigned long long)rem.w[w]));
+                    break;
+                }
+            }
+            if (pbit < lut->val_bits) {
+                for (uint16_t r = 0u; r < true_rank; ++r) {
+                    if (qcc_bv_get(basis_vecs[r].w, pbit)) {
+                        for (uint16_t w = 0u; w < vw && w < QIR_WORDS; ++w) basis_vecs[r].w[w] ^= rem.w[w];
+                    }
+                }
+                basis_vecs[true_rank]    = rem;
+                true_piv_bits[true_rank] = pbit;
                 true_rank++;
             }
         }
         if (true_rank < rank) {
             g->rank_bits  = true_rank;
-            g->comp_words = 1u;
-            g->comp_table = (uint64_t *)qcc_arena_alloc_zero(arena, (size_t)lut->num_entries * sizeof(uint64_t), 8u);
+            g->comp_words = (uint16_t)((true_rank + 63u) / 64u);
+            if (g->comp_words == 0u) g->comp_words = 1u;
+            g->comp_table = (uint64_t *)qcc_arena_alloc_zero(arena, (size_t)lut->num_entries * g->comp_words * sizeof(uint64_t), 8u);
             g->recon_rows = (qcc_bv256_t *)qcc_arena_alloc_zero(arena, (size_t)lut->val_bits * sizeof(qcc_bv256_t), 8u);
             for (uint32_t e = 0u; e < lut->num_entries; ++e) {
-                uint64_t v = lut->table[e] ^ g->const_shift.w[0];
-                uint64_t code = 0u;
                 for (uint16_t r = 0u; r < true_rank; ++r) {
-                    if ((v >> true_piv_bits[r]) & 1u) code |= (UINT64_C(1) << r);
+                    uint16_t pc = true_piv_bits[r];
+                    uint16_t pw = pc >> 6u, pb = pc & 63u;
+                    uint64_t bit = (lut->table[(size_t)e * vw + pw] ^ g->const_shift.w[pw]) >> pb;
+                    if (bit & 1u) qcc_bv_set(&g->comp_table[(size_t)e * g->comp_words], r);
                 }
-                g->comp_table[e] = code;
             }
             for (uint16_t bit = 0u; bit < lut->val_bits; ++bit) {
                 for (uint16_t r = 0u; r < true_rank; ++r) {
-                    if ((basis_vecs[r] >> bit) & 1u) qcc_bv_set(g->recon_rows[bit].w, r);
+                    if (qcc_bv_get(basis_vecs[r].w, bit)) qcc_bv_set(g->recon_rows[bit].w, r);
                 }
             }
             free(basis_vecs);
-            free(orig_vecs);
+            free(true_piv_bits);
             free(piv_entry);
             free(col_used);
             return g;
         }
         free(basis_vecs);
-        free(orig_vecs);
+        free(true_piv_bits);
     }
 
     /* Zero-column strip fallback for arbitrary <= 256 bits */
@@ -787,8 +800,8 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
             qir__egraph_add_enode(eg, &r2);
             eg->rules_fired[2]++;
 
-            /* Rule R8: Virtual-Slot-0 Differential Select-Swap QROAM (b_sh = 1, 2, 3) */
-            for (uint32_t b_sh = 1u; b_sh <= 3u; ++b_sh) {
+            /* Rule R8: Virtual-Slot-0 Differential Select-Swap QROAM (b_sh = 1..6) */
+            for (uint32_t b_sh = 1u; b_sh <= 6u; ++b_sh) {
                 if (b_sh <= op->u.lut.key_bits && op->u.lut.num_entries >= (UINT32_C(1) << b_sh)) {
                     qir_enode_t r8 = node;
                     r8.variant   = QIR_VAR_QROAM_VSLOT0;
@@ -796,6 +809,25 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
                     r8.aux_param = b_sh;
                     qir__egraph_add_enode(eg, &r8);
                     eg->rules_fired[8]++;
+                }
+            }
+
+            /* Rule R8b: Column-Split Virtual-Slot-0 QROAM (K in {2,4}, b_sh in {1..4}) */
+            if (op->u.lut.val_bits >= 16u) {
+                static const uint32_t KS[2] = {2u, 4u};
+                for (uint32_t ki = 0u; ki < 2u; ++ki) {
+                    uint32_t K = KS[ki];
+                    if (op->u.lut.val_bits < K * 2u) continue;
+                    for (uint32_t b_sh = 1u; b_sh <= 4u; ++b_sh) {
+                        if (b_sh <= op->u.lut.key_bits && op->u.lut.num_entries >= (UINT32_C(1) << b_sh)) {
+                            qir_enode_t r8b = node;
+                            r8b.variant   = QIR_VAR_QROAM_SPLIT;
+                            r8b.rule_tag  = 8u;
+                            r8b.aux_param = K | (b_sh << 8u);
+                            qir__egraph_add_enode(eg, &r8b);
+                            eg->rules_fired[8]++;
+                        }
+                    }
                 }
             }
 
@@ -972,7 +1004,7 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
             eg->rules_fired[9]++;
         }
 
-        /* Rule R6: GF2m_Tower_Rank */
+        /* Rule R6: GF2m_Tower_Rank & Rule R11: GF2M_CONST_LINF2 */
         if (op->kind == QIR_OP_GF2M_MUL && op->u.gf2m.m == 12u) {
             qir_enode_t r6 = node;
             r6.variant  = QIR_VAR_GF2M_CHUDNOVSKY_R42;
@@ -995,6 +1027,196 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
             r6.rule_tag = 6u;
             qir__egraph_add_enode(eg, &r6);
             eg->rules_fired[6]++;
+        }
+
+        if (op->kind == QIR_OP_GF2M_MUL && op->num_ins == 2u && op->u.gf2m.m <= 32u) {
+            bool c0 = qir__val_is_const(&mod->vals[op->ins[0]]);
+            bool c1 = qir__val_is_const(&mod->vals[op->ins[1]]);
+            if (c0 || c1) {
+                uint32_t c_idx = c0 ? 0u : 1u;
+                uint32_t var_idx = c_idx ^ 1u;
+                uint32_t cvid = op->ins[c_idx];
+                uint16_t dm = op->u.gf2m.m;
+                uint32_t dmask = (dm == 32u) ? UINT32_MAX : ((UINT32_C(1) << dm) - 1u);
+                uint32_t celem = (uint32_t)(mod->vals[cvid].const_val[0] & dmask);
+                qir_linf2_payload_t *lf = (qir_linf2_payload_t *)qcc_arena_alloc_zero(arena, sizeof(qir_linf2_payload_t), 8u);
+                lf->in_bits  = dm;
+                lf->out_bits = dm;
+                lf->rows     = (qcc_bv256_t *)qcc_arena_alloc_zero(arena, dm * sizeof(qcc_bv256_t), 8u);
+                for (uint16_t c = 0u; c < dm; ++c) {
+                    uint32_t col = qir__gf2m_mul_u32(celem, UINT32_C(1) << c, dm, op->u.gf2m.irred_poly);
+                    for (uint16_t r = 0u; r < dm; ++r) {
+                        if ((col >> r) & 1u) qcc_bv_set(lf->rows[r].w, c);
+                    }
+                }
+                qir_enode_t r11 = node;
+                r11.variant     = QIR_VAR_GF2M_CONST_LINF2;
+                r11.rule_tag    = 13u;
+                r11.aux_param   = var_idx;
+                r11.fused_linf2 = lf;
+                uint32_t cdef = mod->vals[cvid].def_op;
+                if (cdef != UINT32_MAX && mod->ops[cdef].kind == QIR_OP_CONST &&
+                    mod->ops[cdef].pred_val == UINT32_MAX && eg->classes[cvid].use_count == 1u) {
+                    uint32_t *ch = (uint32_t *)qcc_arena_alloc(arena, sizeof(uint32_t), 4u);
+                    ch[0] = cdef;
+                    r11.chain_ops     = ch;
+                    r11.num_chain_ops = 1u;
+                }
+                qir__egraph_add_enode(eg, &r11);
+                eg->rules_fired[13]++;
+            }
+        }
+
+        /* Rule R10a: INPLACE_ARITH for ADD / SUB / GF2M_ADD */
+        if ((op->kind == QIR_OP_ADD || op->kind == QIR_OP_SUB || op->kind == QIR_OP_GF2M_ADD) &&
+            op->num_ins == 2u && op->pred_val == UINT32_MAX && op->num_outs > 0u) {
+            uint16_t ow = mod->vals[op->outs[0]].width;
+            for (uint32_t idx = 0u; idx < 2u; ++idx) {
+                if (mod->vals[op->ins[idx]].width == ow) {
+                    qir_enode_t r10a = node;
+                    r10a.variant   = QIR_VAR_INPLACE_ARITH;
+                    r10a.rule_tag  = 10u;
+                    r10a.aux_param = idx;
+                    qir__egraph_add_enode(eg, &r10a);
+                    eg->rules_fired[10]++;
+                }
+            }
+        }
+
+        /* Rule R10b: CTRL_ADD_CUCCARO for CTRL_SEL(ctrl, v_false, ADD/SUB(v_false, lhs)) */
+        if (op->kind == QIR_OP_CTRL_SEL && op->num_ins == 3u && op->pred_val == UINT32_MAX && op->num_outs > 0u) {
+            uint32_t v_false = op->ins[1], v_true = op->ins[2];
+            uint32_t def_id  = mod->vals[v_true].def_op;
+            uint16_t ow      = mod->vals[op->outs[0]].width;
+            if (def_id != UINT32_MAX && eg->classes[v_true].use_count == 1u && mod->vals[v_false].width == ow) {
+                const qir_op_t *dop = &mod->ops[def_id];
+                if ((dop->kind == QIR_OP_ADD || dop->kind == QIR_OP_SUB) &&
+                    dop->num_ins == 2u && dop->pred_val == UINT32_MAX && mod->vals[v_true].width == ow) {
+                    uint32_t lhs_vid = UINT32_MAX;
+                    bool is_sub = false;
+                    if (dop->kind == QIR_OP_ADD) {
+                        if (dop->ins[0] == v_false)      lhs_vid = dop->ins[1];
+                        else if (dop->ins[1] == v_false) lhs_vid = dop->ins[0];
+                    } else if (dop->ins[0] == v_false) {
+                        lhs_vid = dop->ins[1];
+                        is_sub  = true;
+                    }
+                    if (lhs_vid != UINT32_MAX && lhs_vid != v_false && mod->vals[lhs_vid].width > 0u) {
+                        uint32_t *ch = (uint32_t *)qcc_arena_alloc(arena, sizeof(uint32_t), 4u);
+                        ch[0] = dop->id;
+                        qir_enode_t r10b = node;
+                        r10b.variant       = QIR_VAR_CTRL_ADD_CUCCARO;
+                        r10b.rule_tag      = 11u;
+                        r10b.aux_param     = lhs_vid | (is_sub ? UINT32_C(0x80000000) : 0u);
+                        r10b.chain_ops     = ch;
+                        r10b.num_chain_ops = 1u;
+                        qir__egraph_add_enode(eg, &r10b);
+                        eg->rules_fired[11]++;
+                    }
+                }
+            }
+        }
+
+        /* Rule R10c: XOR_ACCUM for GF2M_ADD(acc, op(...)) */
+        if (op->kind == QIR_OP_GF2M_ADD && op->num_ins == 2u && op->pred_val == UINT32_MAX && op->num_outs > 0u) {
+            uint16_t ow = mod->vals[op->outs[0]].width;
+            for (uint32_t prod_idx = 0u; prod_idx < 2u; ++prod_idx) {
+                uint32_t acc_idx = prod_idx ^ 1u;
+                uint32_t v_prod  = op->ins[prod_idx];
+                uint32_t v_acc   = op->ins[acc_idx];
+                uint32_t def_id  = mod->vals[v_prod].def_op;
+                if (def_id == UINT32_MAX || eg->classes[v_prod].use_count != 1u ||
+                    mod->vals[v_prod].width != ow || mod->vals[v_acc].width != ow ||
+                    op->u.gf2m.m != ow) {
+                    continue;
+                }
+                const qir_op_t *dop = &mod->ops[def_id];
+                if (dop->pred_val != UINT32_MAX || dop->num_outs != 1u) continue;
+                uint32_t *ch = (uint32_t *)qcc_arena_alloc(arena, sizeof(uint32_t), 4u);
+                ch[0] = dop->id;
+                if (dop->kind == QIR_OP_LUT_ROM && dop->u.lut.val_bits == ow) {
+                    const qir_lut_payload_t *dl = &dop->u.lut;
+                    {
+                        qir_enode_t r10c = node;
+                        r10c.variant       = QIR_VAR_XOR_ACCUM;
+                        r10c.rule_tag      = 12u;
+                        r10c.aux_param     = acc_idx | ((uint32_t)QIR_VAR_STD << 8u);
+                        r10c.chain_ops     = ch;
+                        r10c.num_chain_ops = 1u;
+                        qir__egraph_add_enode(eg, &r10c);
+                        eg->rules_fired[12]++;
+                    }
+                    for (uint32_t b_sh = 1u; b_sh <= 6u; ++b_sh) {
+                        if (b_sh <= dl->key_bits && dl->num_entries >= (UINT32_C(1) << b_sh)) {
+                            qir_enode_t r10c = node;
+                            r10c.variant       = QIR_VAR_XOR_ACCUM;
+                            r10c.rule_tag      = 12u;
+                            r10c.aux_param     = acc_idx | ((uint32_t)QIR_VAR_QROAM_VSLOT0 << 8u) | (b_sh << 16u);
+                            r10c.chain_ops     = ch;
+                            r10c.num_chain_ops = 1u;
+                            qir__egraph_add_enode(eg, &r10c);
+                            eg->rules_fired[12]++;
+                        }
+                    }
+                    if (dl->val_bits >= 16u) {
+                        static const uint32_t KS[2] = {2u, 4u};
+                        for (uint32_t ki = 0u; ki < 2u; ++ki) {
+                            uint32_t K = KS[ki];
+                            if (dl->val_bits < K * 2u) continue;
+                            for (uint32_t b_sh = 1u; b_sh <= 4u; ++b_sh) {
+                                if (b_sh <= dl->key_bits && dl->num_entries >= (UINT32_C(1) << b_sh)) {
+                                    uint32_t sub_aux = K | (b_sh << 8u);
+                                    qir_enode_t r10c = node;
+                                    r10c.variant       = QIR_VAR_XOR_ACCUM;
+                                    r10c.rule_tag      = 12u;
+                                    r10c.aux_param     = acc_idx | ((uint32_t)QIR_VAR_QROAM_SPLIT << 8u) | (sub_aux << 16u);
+                                    r10c.chain_ops     = ch;
+                                    r10c.num_chain_ops = 1u;
+                                    qir__egraph_add_enode(eg, &r10c);
+                                    eg->rules_fired[12]++;
+                                }
+                            }
+                        }
+                    }
+                    qir_gauge_lut_t *gl = NULL;
+                    for (uint32_t ei = 0u; ei < eg->classes[v_prod].num_enodes; ++ei) {
+                        const qir_enode_t *pe = &eg->enodes[eg->classes[v_prod].enodes[ei]];
+                        if (pe->variant == QIR_VAR_LIN_GAUGE_TSP && pe->gauge_lut) { gl = pe->gauge_lut; break; }
+                    }
+                    if (!gl) gl = qir__build_gauge_lut(arena, dl);
+                    if (gl) {
+                        qir_enode_t r10c = node;
+                        r10c.variant       = QIR_VAR_XOR_ACCUM;
+                        r10c.rule_tag      = 12u;
+                        r10c.aux_param     = acc_idx | ((uint32_t)QIR_VAR_LIN_GAUGE_TSP << 8u);
+                        r10c.gauge_lut     = gl;
+                        r10c.chain_ops     = ch;
+                        r10c.num_chain_ops = 1u;
+                        qir__egraph_add_enode(eg, &r10c);
+                        eg->rules_fired[12]++;
+                    }
+                } else if (dop->kind == QIR_OP_GF2M_MUL) {
+                    qir_variant_kind_t sv = (dop->u.gf2m.m == 12u) ? QIR_VAR_GF2M_CHUDNOVSKY_R42
+                                          : ((dop->u.gf2m.m == 6u) ? QIR_VAR_GF2M_RANK15 : QIR_VAR_STD);
+                    qir_enode_t r10c = node;
+                    r10c.variant       = QIR_VAR_XOR_ACCUM;
+                    r10c.rule_tag      = 12u;
+                    r10c.aux_param     = acc_idx | ((uint32_t)sv << 8u);
+                    r10c.chain_ops     = ch;
+                    r10c.num_chain_ops = 1u;
+                    qir__egraph_add_enode(eg, &r10c);
+                    eg->rules_fired[12]++;
+                } else if (dop->kind == QIR_OP_LINF2 && dop->num_ins == 1u) {
+                    qir_enode_t r10c = node;
+                    r10c.variant       = QIR_VAR_XOR_ACCUM;
+                    r10c.rule_tag      = 12u;
+                    r10c.aux_param     = acc_idx | ((uint32_t)QIR_VAR_STD << 8u);
+                    r10c.chain_ops     = ch;
+                    r10c.num_chain_ops = 1u;
+                    qir__egraph_add_enode(eg, &r10c);
+                    eg->rules_fired[12]++;
+                }
+            }
         }
 
         /* Rule R2 / Algebraic: AND_VEC with provably zero mask can elide */
