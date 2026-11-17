@@ -1,15 +1,16 @@
 # `QUA` — QCC v3 通用量子電路編譯器、PQC / NIST 量子密碼分析資源編譯器與 Kaggle 驗證工作區
 
-本儲存庫整合純 C17（C++20 標頭相容）容錯量子電路編譯器 **QCC v3**、**PQC / NIST 安全基準量子密碼分析資源編譯器**與 Google Quantum AI 競賽驗證管線，並透過相鄰目錄 `../FLOW`（不複製標頭檔，依 `FLOW_DIR` 指定）引用 `flow.h`、`searu.h` 與 `flow_opt_params.h`。
+本儲存庫整合純 C17（C++20 標頭相容）容錯量子電路編譯器 **QCC v3**、**PQC / NIST 安全基準量子密碼分析資源編譯器**、統一 `FLOW v8.0.0` SSOT 介面（[`Qua.lean`](Qua.lean) + [`qcc/qir_fir.h`](qcc/qir_fir.h)）與 Google Quantum AI 競賽驗證管線，並透過相鄰目錄 `../FLOW`（依 `FLOW_DIR` 指定）引用 `Flow.lean`、`flow.h`、`searu.h`、`flow_opt_params.h` 與 `flow_ir.h`。
 
 ---
 
 ## 目錄結構
 
+- [`Qua.lean`](Qua.lean)：純參數配置檔（`import Flow`，`0` 本地定理、`0` 自訂序列化），以 `Flow.Morphism.Builder` 宣告並透過 `emitFirChecked` 產出 `.linear` 量子算子圖（`gf256_sbox_mac.fir`、`rev_alu_fxp.fir`、`adder_csa_phase.fir`、`gf12_arith.fir`、`wide_lut_cap.fir`）與 `.cartesian` 拒斥見證（`cartesian_reject.fir`）
 - [`qcc/`](qcc/README.md)：**QCC v3 通用容錯量子電路編譯器**
   - `.kmb` v2 雙向編解碼、關鍵路徑 `D_toff` / `D_circ` 統計（[`qcc_kmb.h`](qcc/qcc_kmb.h)）、Arena 與 256-bit / 128-bit 基礎元件（[`qcc_arena.h`](qcc/qcc_arena.h)）
-  - SSA QIR（[`qir.h`](qcc/qir.h) / [`qir_dsl.h`](qcc/qir_dsl.h)）、無尺度 `>256` qubit 反編譯提升（[`qir_lift.h`](qcc/qir_lift.h)）
-  - E-Graph 飽和重寫 `R1`–`R11`（含 $\text{GF}(2^8)$ Rank-27、[`qir_rewrite.h`](qcc/qir_rewrite.h)）、容錯核心庫（含 $\text{GF}(2^8)$ 三層代數塔 `36`/`18` CCX 反元素，[`qir_kernels.h`](qcc/qir_kernels.h)）、實體配置降階（[`qir_codegen.h`](qcc/qir_codegen.h)）、`SEARU` × `FLOW` 2-Jet 排程最佳化與 65,536-qubit 配置（[`qir_opt.h`](qcc/qir_opt.h)）、`.kmb` 通道與統一編譯 API（[`qir_pass_kmb.h`](qcc/qir_pass_kmb.h)）、雙種子等價驗證（[`qir_verify.h`](qcc/qir_verify.h)）及 CLI / `T1`–`T21` 測試套件（[`qcc_main.c`](qcc/qcc_main.c)）
+  - SSA QIR（[`qir.h`](qcc/qir.h)）、統一 `.fir` QTT 線性閘口橋接器（[`qir_fir.h`](qcc/qir_fir.h)，拒斥 `.cartesian` 並降階 `.linear` 至 QIR）、無尺度 `>256` qubit 反編譯提升（[`qir_lift.h`](qcc/qir_lift.h)）
+  - E-Graph 飽和重寫 `R1`–`R11`（含 $\text{GF}(2^8)$ Rank-27、[`qir_rewrite.h`](qcc/qir_rewrite.h)）、容錯核心庫（[`qir_kernels.h`](qcc/qir_kernels.h)）、實體配置降階（[`qir_codegen.h`](qcc/qir_codegen.h)）、`SEARU` × `FLOW` 2-Jet 排程最佳化與 65,536-qubit 配置（[`qir_opt.h`](qcc/qir_opt.h)）、`.kmb` 通道與統一編譯 API（[`qir_pass_kmb.h`](qcc/qir_pass_kmb.h)）、雙種子等價驗證（[`qir_verify.h`](qcc/qir_verify.h)）及 CLI / `T1`–`T22` 測試套件 + `lean-fir` 跨界同圖雙投影驗證（`ELE` `.sv`/`.gds` vs `QUA` `.kmb`，[`qcc_main.c`](qcc/qcc_main.c)）
 - [`pqc/`](pqc/README.md)：**PQC / NIST 安全基準量子密碼分析資源編譯器**
   - [`include/pqc_oracles.h`](pqc/include/pqc_oracles.h)：純宣告式 SSA QIR Oracle 建構器與獨立經典參考實作，涵蓋 **AES-128/192/256**、**SHA-256 / Ascon-p[12] / Keccak-f[400]**、**Classic McEliece ($\text{GF}(2^{12})$ Goppa & ISD)**、**ML-KEM ($q=3329$ LWE)** 與 **MQ ($n=24, m=24$)**（零手動 `.kmb` 閘發射）
   - [`include/pqc_nist_est.h`](pqc/include/pqc_nist_est.h)：純整數 Q16.16 `log2` 與 Zalka / JNRV `MAXDEPTH` ($2^{40} / 2^{64} / 2^{96}$) 容錯資源估算引擎（Gidney `4 * CCX` 與酉 `7 * CCX` 等效 T 閘數、DAG `T-depth` 與 `Circ-depth`）

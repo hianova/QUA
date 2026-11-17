@@ -5,6 +5,7 @@
  */
 #include "qir_verify.h"
 #include "qir_pass_kmb.h"
+#include "qir_fir.h"
 
 static bool qcc__ends_with(const char *s, const char *suf) {
     size_t ls = strlen(s), lsf = strlen(suf);
@@ -23,9 +24,8 @@ static void print_usage(FILE *out) {
     fprintf(out,
             "QCC — Universal Fault-Tolerant Quantum Circuit Compiler\n"
             "Subcommands:\n"
-            "  qcc opt <in.qir|in.kmb> -o <out.kmb> [--max-q N] [--metric default|qc|q2t|qt] [--iters N] [--verify-batches N] [--emit-qir post.qir] [--clean-anc] [--emit-clean-reg]\n"
-            "  qcc lift <in.kmb> -o <out.qir>\n"
-            "  qcc verify <circuit.kmb> [--ref <ref.kmb|ref.qir>] [--states N] [--in-regs N]\n"
+            "  qcc opt <in.kmb|in.fir> -o <out.kmb> [--max-q N] [--metric default|qc|q2t|qt] [--iters N] [--verify-batches N] [--clean-anc] [--emit-clean-reg]\n"
+            "  qcc verify <circuit.kmb> [--ref <ref.kmb|ref.fir>] [--states N] [--in-regs N]\n"
             "  qcc inspect <circuit.kmb>\n"
             "  qcc selftest\n");
 }
@@ -80,64 +80,13 @@ static int cmd_inspect(int argc, char **argv) {
     return 0;
 }
 
-static int cmd_lift(int argc, char **argv) {
-    const char *in_path = NULL, *out_path = NULL;
-    for (int i = 2; i < argc; ++i) {
-        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: qcc lift <in.kmb> -o <out.qir>\n");
-            return 0;
-        } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
-            out_path = argv[++i];
-        } else if (argv[i][0] == '-') {
-            fprintf(stderr, "Error: unknown or incomplete option '%s'\n", argv[i]);
-            return 2;
-        } else if (!in_path) {
-            in_path = argv[i];
-        }
-    }
-    if (!in_path || !out_path) {
-        fprintf(stderr, "Usage: qcc lift <in.kmb> -o <out.qir>\n");
-        return 2;
-    }
-    qcc_kmb_circuit_t kmb;
-    if (qcc_kmb_read(&kmb, in_path) != 0) {
-        fprintf(stderr, "Error: failed to read %s\n", in_path);
-        return 1;
-    }
-    qcc_arena_t arena;
-    qcc_arena_init(&arena, 512u * 1024u);
-    qir_module_t mod;
-    qir_lift_stats_t lst;
-    if (!qir_lift_from_kmb(&mod, &arena, &kmb, "lifted", &lst)) {
-        fprintf(stderr, "Error: failed to lift %s\n", in_path);
-        qcc_kmb_free(&kmb);
-        qcc_arena_free(&arena);
-        return 1;
-    }
-    if (!qir_write_file(&mod, out_path)) {
-        fprintf(stderr, "Error: failed to write %s\n", out_path);
-        qir_module_free(&mod);
-        qcc_kmb_free(&kmb);
-        qcc_arena_free(&arena);
-        return 1;
-    }
-    printf("[qcc lift] %s -> %s (ops=%zu, linf2=%u, phase=%u, and_vec=%u, opaque=%u)\n",
-           in_path, out_path, kmb.num_ops,
-           (unsigned)lst.lifted_linf2, (unsigned)lst.lifted_phase,
-           (unsigned)lst.lifted_and_vec, (unsigned)lst.lifted_opaque);
-    qir_module_free(&mod);
-    qcc_kmb_free(&kmb);
-    qcc_arena_free(&arena);
-    return 0;
-}
-
 static int cmd_opt(int argc, char **argv) {
-    const char *in_path = NULL, *out_path = NULL, *emit_qir = NULL;
+    const char *in_path = NULL, *out_path = NULL;
     qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
     uint32_t verify_batches = 64u;
     for (int i = 2; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: qcc opt <in.qir|in.kmb> -o <out.kmb> [--max-q N] [--metric default|qc|q2t|qt] [--iters N] [--verify-batches N] [--emit-qir post.qir] [--clean-anc] [--emit-clean-reg]\n");
+            printf("Usage: qcc opt <in.kmb|in.fir> -o <out.kmb> [--max-q N] [--metric default|qc|q2t|qt] [--iters N] [--verify-batches N] [--clean-anc] [--emit-clean-reg]\n");
             return 0;
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out_path = argv[++i];
@@ -145,8 +94,6 @@ static int cmd_opt(int argc, char **argv) {
             cfg.max_qubits = (uint32_t)strtoul(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "--metric") == 0 && i + 1 < argc) {
             cfg.cost_mode = qcc__parse_metric(argv[++i]);
-        } else if (strcmp(argv[i], "--emit-qir") == 0 && i + 1 < argc) {
-            emit_qir = argv[++i];
         } else if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
             cfg.searu_iters = (uint32_t)strtoul(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "--verify-batches") == 0 && i + 1 < argc) {
@@ -163,7 +110,7 @@ static int cmd_opt(int argc, char **argv) {
         }
     }
     if (!in_path || !out_path) {
-        fprintf(stderr, "Usage: qcc opt <in.qir|in.kmb> -o <out.kmb> [--max-q N] [--metric default|qc|q2t|qt] [--iters N] [--verify-batches N] [--emit-qir post.qir] [--clean-anc] [--emit-clean-reg]\n");
+        fprintf(stderr, "Usage: qcc opt <in.kmb|in.fir> -o <out.kmb> [--max-q N] [--metric default|qc|q2t|qt] [--iters N] [--verify-batches N] [--clean-anc] [--emit-clean-reg]\n");
         return 2;
     }
 
@@ -178,16 +125,18 @@ static int cmd_opt(int argc, char **argv) {
             ok = qir_lift_from_kmb(&mod, &arena, &kmb, "lifted_opt", NULL);
             qcc_kmb_free(&kmb);
         }
+    } else if (qcc__ends_with(in_path, ".fir")) {
+        ok = qir_load_fir_file(&mod, &arena, in_path);
     } else {
-        ok = qir_parse_file(&mod, &arena, in_path);
+        fprintf(stderr, "Error: unsupported input extension for %s (expected .fir or .kmb)\n", in_path);
+        qcc_arena_free(&arena);
+        return 2;
     }
     if (!ok) {
         fprintf(stderr, "Error: failed to load %s\n", in_path);
         qcc_arena_free(&arena);
         return 1;
     }
-
-    if (emit_qir) qir_write_file(&mod, emit_qir);
 
     qir_egraph_t eg;
     qir_phys_plan_t plan;
@@ -267,7 +216,7 @@ static int cmd_verify(int argc, char **argv) {
     int32_t in_regs_opt = -1;
     for (int i = 2; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: qcc verify <circuit.kmb> [--ref <ref.kmb|ref.qir>] [--states N] [--in-regs N]\n");
+            printf("Usage: qcc verify <circuit.kmb> [--ref <ref.kmb|ref.fir>] [--states N] [--in-regs N]\n");
             return 0;
         } else if (strcmp(argv[i], "--ref") == 0 && i + 1 < argc) {
             ref_path = argv[++i];
@@ -283,7 +232,7 @@ static int cmd_verify(int argc, char **argv) {
         }
     }
     if (!cand_path) {
-        fprintf(stderr, "Usage: qcc verify <circuit.kmb> [--ref <ref.kmb|ref.qir>] [--states N] [--in-regs N]\n");
+        fprintf(stderr, "Usage: qcc verify <circuit.kmb> [--ref <ref.kmb|ref.fir>] [--states N] [--in-regs N]\n");
         return 2;
     }
 
@@ -404,8 +353,9 @@ static int cmd_verify(int argc, char **argv) {
         qcc_arena_t arena;
         qcc_arena_init(&arena, 512u * 1024u);
         qir_module_t ref_mod;
-        if (!qir_parse_file(&ref_mod, &arena, ref_path)) {
-            fprintf(stderr, "Error: failed to parse %s\n", ref_path);
+        bool ref_ok = qcc__ends_with(ref_path, ".fir") && qir_load_fir_file(&ref_mod, &arena, ref_path);
+        if (!ref_ok) {
+            fprintf(stderr, "Error: failed to load %s (expected .fir or .kmb)\n", ref_path);
             qcc_kmb_free(&cand);
             qcc_arena_free(&arena);
             return 1;
@@ -640,10 +590,10 @@ static int cmd_selftest(void) {
         remove(tmp);
     }
 
-    /* T2: Rule R1 (LinF2_Fuse) + DSL parse round-trip */
+    /* T2: Rule R1 (LinF2_Fuse) via direct QIR C API */
     {
         qcc_arena_t ar; qcc_arena_init(&ar, 256u * 1024u);
-        qir_module_t m, m_parsed;
+        qir_module_t m;
         qir_module_init(&m, &ar, "r1_linf2");
         uint32_t x = qir_add_input(&m, 8u, "x");
         qcc_bv256_t r1[8], r2[8], c1 = qcc_bv_zero(), c2 = qcc_bv_zero();
@@ -657,18 +607,9 @@ static int cmd_selftest(void) {
         qir_add_output(&m, t2);
         qir_recompute_zero_masks(&m);
 
-        const char *dsl_tmp = "/tmp/qcc_selftest_dsl.qir";
-        qir_write_file(&m, dsl_tmp);
-        if (!qir_parse_file(&m_parsed, &ar, dsl_tmp)) {
-            printf("  FAIL [T2 DSL round-trip parse]\n");
-            fails++;
-        } else {
-            qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
-            qcc_kmb_stats_t st;
-            if (!test_compile_and_verify("T2_R1_LinF2_Fuse_DSL", &m_parsed, &ar, &cfg, 1024u, false, true, false, 0u, &st)) fails++;
-            qir_module_free(&m_parsed);
-        }
-        remove(dsl_tmp);
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        qcc_kmb_stats_t st;
+        if (!test_compile_and_verify("T2_R1_LinF2_Fuse", &m, &ar, &cfg, 1024u, false, true, false, 0u, &st)) fails++;
         qir_module_free(&m);
         qcc_arena_free(&ar);
     }
@@ -926,30 +867,35 @@ static int cmd_selftest(void) {
 
     /* T12: Cascading Zero-Garbage Uncomputation Oracle (clean_anc + backing-set aliases) */
     {
-        const char *dsl =
-            "(qir \"t12_clean_oracle\"\n"
-            "  (clean_anc)\n"
-            "  (input %x u4)\n"
-            "  (let %lut_v u6 (lut_rom %x (0x01 0x03 0x07 0x0c 0x12 0x19 0x1f 0x28 0x2d 0x33 0x37 0x3b 0x3d 0x3e 0x3f 0x00)))\n"
-            "  (let %s4 u4 (slice %lut_v 1 5))\n"
-            "  (let %sq u4 (sqr_fxp %s4 :frac 3 3))\n"
-            "  (let %k u4 (const 5))\n"
-            "  (let %prod u4 (mul_fxp %sq %k :frac 3 3 3))\n"
-            "  (let %subv u4 (sub %prod %s4))\n"
-            "  (let %ph u0 (phase_poly (%subv) (and 0x3 :turns 0.125) (and 0x5 :turns 0.25)))\n"
-            "  (output %x)\n"
-            ")\n";
         qcc_arena_t ar; qcc_arena_init(&ar, 512u * 1024u);
         qir_module_t m;
-        if (!qir_parse_str(&m, &ar, dsl, strlen(dsl))) {
-            printf("  FAIL [T12 DSL parse]\n");
-            fails++;
-        } else {
-            qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
-            qcc_kmb_stats_t st;
-            if (!test_compile_and_verify("T12_Cascading_ZeroGarbage_Oracle", &m, &ar, &cfg, 256u, false, false, false, 0u, &st)) fails++;
-            qir_module_free(&m);
-        }
+        qir_module_init(&m, &ar, "t12_clean_oracle");
+        m.require_clean_scratch = true;
+        uint32_t x = qir_add_input(&m, 4u, "x");
+        static const uint64_t tbl12[16] = {
+            0x01u, 0x03u, 0x07u, 0x0cu, 0x12u, 0x19u, 0x1fu, 0x28u,
+            0x2du, 0x33u, 0x37u, 0x3bu, 0x3du, 0x3eu, 0x3fu, 0x00u
+        };
+        uint32_t lut_v = qir_emit_lut_rom(&m, x, 6u, 16u, tbl12, 0u, "lut_v");
+        uint32_t s4    = qir_emit_slice(&m, lut_v, 1u, 5u, "s4");
+        uint32_t sq    = qir_emit_sqr_fxp(&m, s4, 4u, 3u, 3u, 0u, "sq");
+        uint32_t k     = qir_emit_const_u64(&m, 4u, 5u, "k");
+        uint32_t prod  = qir_emit_mul_fxp(&m, sq, k, 4u, 3u, 3u, 3u, 0u, "prod");
+        uint32_t subv  = qir_emit_sub(&m, prod, s4, 0u, "subv");
+        qir_phase_term_t terms12[2];
+        memset(terms12, 0, sizeof(terms12));
+        terms12[0].mask[0] = 0x3u;
+        terms12[0].angle   = ((flow_u128)1) << 125; /* 0.125 turns */
+        terms12[1].mask[0] = 0x5u;
+        terms12[1].angle   = ((flow_u128)1) << 126; /* 0.25 turns */
+        qir_emit_phase_poly(&m, &subv, 1u, terms12, 2u, "ph");
+        qir_add_output(&m, x);
+        qir_recompute_zero_masks(&m);
+
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        qcc_kmb_stats_t st;
+        if (!test_compile_and_verify("T12_Cascading_ZeroGarbage_Oracle", &m, &ar, &cfg, 256u, false, false, false, 0u, &st)) fails++;
+        qir_module_free(&m);
         qcc_arena_free(&ar);
     }
 
@@ -1059,99 +1005,94 @@ static int cmd_selftest(void) {
 
     /* T14: Classical HMR Measurement, Kickback Cancellation & Classical Control Predicates */
     {
-        const char *dsl =
-            "(qir \"t14_classical\"\n"
-            "  (input %a u1)\n"
-            "  (input %b u1)\n"
-            "  (input %x u2)\n"
-            "  (let %r u1 (and_vec %a %b))\n"
-            "  (let %m c1 (hmr_meas %r))\n"
-            "  (let %ph u0 (phase_poly (%a %b) (and 0x3 :turns 0.5) :if %m))\n"
-            "  (let %nm c1 (bit_not %m))\n"
-            "  (let %t1 c1 (bit_xor %m %nm))\n"
-            "  (let %c0 c1 (bit_and %m %nm))\n"
-            "  (let %k u2 (const 1))\n"
-            "  (let %out u2 (add %x %k :if %t1))\n"
-            "  (let %out2 u2 (add %out %k :if %c0))\n"
-            "  (output %a)\n"
-            "  (output %b)\n"
-            "  (output %out2)\n"
-            "  (output_bits %t1)\n"
-            "  (output_bits %c0)\n"
-            ")\n";
         qcc_arena_t ar; qcc_arena_init(&ar, 512u * 1024u);
-        qir_module_t m, m2;
-        const char *tmp_qir = "/tmp/qcc_selftest_t14.qir";
-        if (!qir_parse_str(&m, &ar, dsl, strlen(dsl)) || !qir_write_file(&m, tmp_qir) || !qir_parse_file(&m2, &ar, tmp_qir)) {
-            printf("  FAIL [T14 DSL round-trip]\n");
-            fails++;
-        } else {
-            qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
-            qcc_kmb_stats_t st;
-            if (!test_compile_and_verify("T14_Classical_Meas_Cond_Pred", &m2, &ar, &cfg, 256u, false, false, false, 0u, &st)) fails++;
-            qir_module_free(&m2);
-            qir_module_free(&m);
-        }
-        remove(tmp_qir);
+        qir_module_t m;
+        qir_module_init(&m, &ar, "t14_classical");
+        uint32_t a = qir_add_input(&m, 1u, "a");
+        uint32_t b = qir_add_input(&m, 1u, "b");
+        uint32_t x = qir_add_input(&m, 2u, "x");
+        uint32_t r = qir_emit_and_vec(&m, a, b, 0u, "r");
+        uint32_t meas = qir_emit_hmr_meas(&m, r, "m");
+        qir_phase_term_t term14;
+        memset(&term14, 0, sizeof(term14));
+        term14.mask[0] = 0x3u;
+        term14.angle   = ((flow_u128)1) << 127; /* 0.5 turns */
+        uint32_t ph_ins[2] = {a, b};
+        uint32_t ph = qir_emit_phase_poly(&m, ph_ins, 2u, &term14, 1u, "ph");
+        qir_set_op_pred(&m, m.vals[ph].def_op, meas);
+        uint32_t nm   = qir_emit_bit_op(&m, 2u, meas, 0u, "nm");
+        uint32_t t1   = qir_emit_bit_op(&m, 0u, meas, nm, "t1");
+        uint32_t c0   = qir_emit_bit_op(&m, 1u, meas, nm, "c0");
+        uint32_t k    = qir_emit_const_u64(&m, 2u, 1u, "k");
+        uint32_t out1 = qir_emit_add(&m, x, k, 0u, "out");
+        qir_set_op_pred(&m, m.vals[out1].def_op, t1);
+        uint32_t out2 = qir_emit_add(&m, out1, k, 0u, "out2");
+        qir_set_op_pred(&m, m.vals[out2].def_op, c0);
+        qir_add_output(&m, a);
+        qir_add_output(&m, b);
+        qir_add_output(&m, out2);
+        qir_add_classical_output(&m, t1);
+        qir_add_classical_output(&m, c0);
+        qir_recompute_zero_masks(&m);
+
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        qcc_kmb_stats_t st;
+        if (!test_compile_and_verify("T14_Classical_Meas_Cond_Pred", &m, &ar, &cfg, 256u, false, false, false, 0u, &st)) fails++;
+        qir_module_free(&m);
         qcc_arena_free(&ar);
     }
 
     /* T15: Declarative approx_fn (invsqrt & recip) + FLOW 2-Jet Numerical Accuracy */
     {
-        const char *dsl =
-            "(qir \"t15_approx_fn\"\n"
-            "  (input %x u8)\n"
-            "  (let %y u8 (approx_fn %x :fn invsqrt :seg 4 :deg 2 :frac 5))\n"
-            "  (let %r u8 (approx_fn %x :fn recip :seg 4 :deg 2 :frac 7))\n"
-            "  (output %y)\n"
-            "  (output %r)\n"
-            ")\n";
         qcc_arena_t ar; qcc_arena_init(&ar, 2048u * 1024u);
         qir_module_t m;
-        if (!qir_parse_str(&m, &ar, dsl, strlen(dsl))) {
-            printf("  FAIL [T15 DSL parse]\n");
-            fails++;
-        } else {
-            qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
-            qcc_kmb_stats_t st;
-            bool v_ok = test_compile_and_verify("T15_Declarative_ApproxFn_2Jet", &m, &ar, &cfg, 256u, false, false, true, 8u, &st);
+        qir_module_init(&m, &ar, "t15_approx_fn");
+        uint32_t x = qir_add_input(&m, 8u, "x");
+        uint32_t y = qir_emit_approx_fn(&m, x, 0u, 4u, 2u, 8u, 5u, "y");
+        uint32_t r = qir_emit_approx_fn(&m, x, 1u, 4u, 2u, 8u, 7u, "r");
+        qir_add_output(&m, y);
+        qir_add_output(&m, r);
+        qir_recompute_zero_masks(&m);
 
-            /* Numerically verify QIR approx_fn outputs against exact 1/sqrt(x) and 1/x for all x=1..255 */
-            qir_val_vec64_t *in_v = (qir_val_vec64_t *)calloc(1u, sizeof(qir_val_vec64_t));
-            qcc_arena_t ev_ar; qcc_arena_init(&ev_ar, 512u * 1024u);
-            uint64_t max_y_err = 0u, max_r_err = 0u;
-            for (uint32_t base = 0u; base < 256u; base += 64u) {
-                memset(in_v, 0, sizeof(*in_v));
-                for (uint32_t l = 0u; l < 64u; ++l) in_v->lanes[l][0] = base + l;
-                qir_val_vec64_t *out_vals = NULL;
-                flow_u128 ph[64];
-                qcc_arena_reset(&ev_ar);
-                if (!qir_eval_64(&m, in_v, UINT64_C(1), &ev_ar, &out_vals, ph)) {
-                    max_y_err = 999u;
-                    break;
-                }
-                for (uint32_t l = 0u; l < 64u; ++l) {
-                    uint32_t x = base + l;
-                    if (x == 0u) continue;
-                    uint64_t got_y = out_vals[m.outputs[0]].lanes[l][0];
-                    uint64_t got_r = out_vals[m.outputs[1]].lanes[l][0];
-                    uint64_t ref_y = (flow_isqrt_round_u128(((flow_u128)1024u << 64u) / (flow_u128)x) + (UINT64_C(1) << 31u)) >> 32u;
-                    uint64_t ref_r = (128u + x / 2u) / x;
-                    uint64_t ey = (got_y > ref_y) ? (got_y - ref_y) : (ref_y - got_y);
-                    uint64_t er = (got_r > ref_r) ? (got_r - ref_r) : (ref_r - got_r);
-                    if (ey > max_y_err) max_y_err = ey;
-                    if (er > max_r_err) max_r_err = er;
-                }
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        qcc_kmb_stats_t st;
+        bool v_ok = test_compile_and_verify("T15_Declarative_ApproxFn_2Jet", &m, &ar, &cfg, 256u, false, false, true, 8u, &st);
+
+        /* Numerically verify QIR approx_fn outputs against exact 1/sqrt(x) and 1/x for all x=1..255 */
+        qir_val_vec64_t *in_v = (qir_val_vec64_t *)calloc(1u, sizeof(qir_val_vec64_t));
+        qcc_arena_t ev_ar; qcc_arena_init(&ev_ar, 512u * 1024u);
+        uint64_t max_y_err = 0u, max_r_err = 0u;
+        for (uint32_t base = 0u; base < 256u; base += 64u) {
+            memset(in_v, 0, sizeof(*in_v));
+            for (uint32_t l = 0u; l < 64u; ++l) in_v->lanes[l][0] = base + l;
+            qir_val_vec64_t *out_vals = NULL;
+            flow_u128 ph[64];
+            qcc_arena_reset(&ev_ar);
+            if (!qir_eval_64(&m, in_v, UINT64_C(1), &ev_ar, &out_vals, ph)) {
+                max_y_err = 999u;
+                break;
             }
-            if (!v_ok || max_y_err > 2u || max_r_err > 2u) {
-                printf("  FAIL [T15 math accuracy: max_y_err=%llu max_r_err=%llu]\n",
-                       (unsigned long long)max_y_err, (unsigned long long)max_r_err);
-                fails++;
+            for (uint32_t l = 0u; l < 64u; ++l) {
+                uint32_t xv = base + l;
+                if (xv == 0u) continue;
+                uint64_t got_y = out_vals[m.outputs[0]].lanes[l][0];
+                uint64_t got_r = out_vals[m.outputs[1]].lanes[l][0];
+                uint64_t ref_y = (flow_isqrt_round_u128(((flow_u128)1024u << 64u) / (flow_u128)xv) + (UINT64_C(1) << 31u)) >> 32u;
+                uint64_t ref_r = (128u + xv / 2u) / xv;
+                uint64_t ey = (got_y > ref_y) ? (got_y - ref_y) : (ref_y - got_y);
+                uint64_t er = (got_r > ref_r) ? (got_r - ref_r) : (ref_r - got_r);
+                if (ey > max_y_err) max_y_err = ey;
+                if (er > max_r_err) max_r_err = er;
             }
-            free(in_v);
-            qcc_arena_free(&ev_ar);
-            qir_module_free(&m);
         }
+        if (!v_ok || max_y_err > 2u || max_r_err > 2u) {
+            printf("  FAIL [T15 math accuracy: max_y_err=%llu max_r_err=%llu]\n",
+                   (unsigned long long)max_y_err, (unsigned long long)max_r_err);
+            fails++;
+        }
+        free(in_v);
+        qcc_arena_free(&ev_ar);
+        qir_module_free(&m);
         qcc_arena_free(&ar);
     }
 
@@ -1226,67 +1167,43 @@ static int cmd_selftest(void) {
         qcc_arena_free(&ar);
     }
 
-    /* T18: Classical Inputs, PHASE_DOT (Z_IF & GF(2^12) CZ_IF 0-CCX), OR_REDUCE & DSL Round-Trip */
+    /* T18: Classical Inputs, PHASE_DOT (Z_IF & GF(2^12) CZ_IF 0-CCX), OR_REDUCE */
     {
-        const char *dsl18 =
-            "(qir \"t18_classical_pdot\"\n"
-            "  (input %qa u12)\n"
-            "  (input %qb u12)\n"
-            "  (input %c c12)\n"
-            "  (let %d0 u0 (phase_dot %qa %c))\n"
-            "  (let %d1 u0 (phase_dot %qa %qb %c 12 0x1053))\n"
-            "  (let %ored c1 (bit_or_reduce %c))\n"
-            "  (output %qa)\n"
-            "  (output %qb)\n"
-            "  (output_bits %ored)\n"
-            ")\n";
         qcc_arena_t ar; qcc_arena_init(&ar, 512u * 1024u);
-        qir_module_t m, m2;
-        if (!qir_parse_str(&m, &ar, dsl18, strlen(dsl18))) {
-            printf("  FAIL [T18 DSL parse]\n");
+        qir_module_t m;
+        qir_module_init(&m, &ar, "t18_classical_pdot");
+        uint32_t qa   = qir_add_input(&m, 12u, "qa");
+        uint32_t qb   = qir_add_input(&m, 12u, "qb");
+        uint32_t c    = qir_add_classical_input(&m, 12u, "c");
+        qir_emit_phase_dot(&m, qa, c, "d0");
+        qir_emit_phase_dot_gf2m(&m, qa, qb, c, 12u, 0x1053u, "d1");
+        uint32_t ored = qir_emit_bit_op(&m, 3u, c, 0u, "ored");
+        qir_add_output(&m, qa);
+        qir_add_output(&m, qb);
+        qir_add_classical_output(&m, ored);
+        qir_recompute_zero_masks(&m);
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        qcc_kmb_stats_t st;
+        if (!test_compile_and_verify("T18_ClassicalIn_PhaseDot_OrReduce", &m, &ar, &cfg, 4u, false, true, false, 0u, &st)) {
             fails++;
-        } else {
-            char buf[2048];
-            FILE *mf = tmpfile();
-            if (mf) {
-                qir_print_module(&m, mf);
-                rewind(mf);
-                size_t nr = fread(buf, 1u, sizeof(buf) - 1u, mf);
-                buf[nr] = '\0';
-                fclose(mf);
-                if (!qir_parse_str(&m2, &ar, buf, nr)) {
-                    printf("  FAIL [T18 DSL round-trip parse]\n");
-                    fails++;
-                } else {
-                    qir_recompute_zero_masks(&m2);
-                    qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
-                    qcc_kmb_stats_t st;
-                    if (!test_compile_and_verify("T18_ClassicalIn_PhaseDot_OrReduce", &m2, &ar, &cfg, 4u, false, true, false, 0u, &st)) {
-                        fails++;
-                    }
-                    qir_module_free(&m2);
-                }
-            }
-            qir_module_free(&m);
         }
+        qir_module_free(&m);
         qcc_arena_free(&ar);
     }
 
     /* T19: Declarative Dyadic Piecewise Quadratic Phase Oracle (phase_fn) */
     {
-        const char *dsl19 =
-            "(qir \"t19_dyadic_phase\"\n"
-            "  (clean_anc)\n"
-            "  (input %x u12)\n"
-            "  (phase_fn %x invsqrt :min 1 :max 4000 :seg 6 :frac 30 :poly 26)\n"
-            "  (output %x)\n"
-            ")\n";
         qcc_arena_t ar; qcc_arena_init(&ar, 2048u * 1024u);
         qir_module_t m;
-        if (!qir_parse_str(&m, &ar, dsl19, strlen(dsl19))) {
-            printf("  FAIL [T19 DSL parse]\n");
+        qir_module_init(&m, &ar, "t19_dyadic_phase");
+        m.require_clean_scratch = true;
+        uint32_t x = qir_add_input(&m, 12u, "x");
+        if (!qir_emit_dyadic_phase_fn(&m, x, 1u, 4000u, 6u, 30u, 26u, qir__builtin_invsqrt_ref, NULL)) {
+            printf("  FAIL [T19 dyadic_phase_fn]\n");
             fails++;
         } else {
+            qir_add_output(&m, x);
+            qir_recompute_zero_masks(&m);
             qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
             cfg.require_clean_scratch = true;
             qcc_kmb_circuit_t kmb;
@@ -1464,6 +1381,71 @@ static int cmd_selftest(void) {
         qcc_arena_free(&ar);
     }
 
+    /* T22: Unified FLOW_IR (.fir) QTT Gate — Linear Admission vs Cartesian Rejection & 0-ULP Sim */
+    {
+        uint8_t buf[512];
+        memset(buf, 0, sizeof(buf));
+        /* Build a minimal .linear GF(2^8) inv morphism in-memory + FNVs, test admission & rejection */
+        const char *mname = "t22_fir_lin";
+        const char *iname = "a";
+        const char *oname = "y";
+        /* layout: hdr(64) + 2*val(64) + in_pad(8) + out_pad(8) + 1*op(72) = 216B body + 8B fnv */
+        const size_t body = 64u + 64u + 8u + 8u + 72u;
+        uint32_t hdr[10] = {0x31524946u, 1u, 1u, 1u, 2u, 1u, 1u, 1u, 0u, 0u};
+        for (size_t i = 0u; i < 10u; ++i) {
+            buf[i * 4u + 0u] = (uint8_t)(hdr[i] & 0xFFu);
+            buf[i * 4u + 1u] = (uint8_t)((hdr[i] >> 8u) & 0xFFu);
+            buf[i * 4u + 2u] = (uint8_t)((hdr[i] >> 16u) & 0xFFu);
+            buf[i * 4u + 3u] = (uint8_t)((hdr[i] >> 24u) & 0xFFu);
+        }
+        memcpy(buf + 40u, mname, strlen(mname));
+        buf[64u] = 8u; memcpy(buf + 64u + 8u, iname, strlen(iname));
+        buf[96u] = 8u; memcpy(buf + 96u + 8u, oname, strlen(oname));
+        buf[136u] = 1u; /* output = val 1 */
+        uint8_t *opw = buf + 144u;
+        opw[0] = 13u; /* GF2M_INV */
+        opw[2] = 1u;  /* num_ins */
+        opw[4] = 1u;  /* out_val = 1 */
+        opw[40] = 8u; /* p0 = deg 8 */
+        opw[48] = 0x1Bu; opw[49] = 0x01u; /* p1 = 0x11B */
+        uint64_t fh = flow_ir__fnv1a64(buf, body);
+        for (size_t k = 0u; k < 8u; ++k) {
+            buf[body + k] = (uint8_t)((fh >> (k * 8u)) & 0xFFu);
+        }
+
+        qcc_arena_t ar; qcc_arena_init(&ar, 512u * 1024u);
+        qir_module_t m;
+        if (!qir_load_fir_bytes(&m, &ar, buf, body + 8u)) {
+            printf("  FAIL [T22 linear .fir load]\n");
+            fails++;
+        } else {
+            qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+            cfg.require_clean_scratch = true;
+            qcc_kmb_stats_t st;
+            if (!test_compile_and_verify("T22a_FlowIr_Linear_GF256Inv", &m, &ar, &cfg, 4u, false, false, false, 0u, &st)) {
+                fails++;
+            }
+            qir_module_free(&m);
+        }
+
+        /* Mutate multiplicity to CARTESIAN (2) + re-sign FNV-1a and verify quantum backend rejects it */
+        buf[8] = 2u;
+        fh = flow_ir__fnv1a64(buf, body);
+        for (size_t k = 0u; k < 8u; ++k) {
+            buf[body + k] = (uint8_t)((fh >> (k * 8u)) & 0xFFu);
+        }
+        qir_module_t m_bad;
+        memset(&m_bad, 0, sizeof(m_bad));
+        if (qir_load_fir_bytes(&m_bad, &ar, buf, body + 8u)) {
+            printf("  FAIL [T22b cartesian .fir should have been rejected]\n");
+            qir_module_free(&m_bad);
+            fails++;
+        } else {
+            printf("PASS [T22b_FlowIr_Cartesian_QTT_Reject]: cartesian morphism blocked by QIR\n");
+        }
+        qcc_arena_free(&ar);
+    }
+
     printf("=== Selftest Summary: %s (fails=%d) ===\n", fails == 0 ? "ALL PASS" : "FAILED", fails);
     return fails == 0 ? 0 : 1;
 }
@@ -1477,7 +1459,6 @@ int main(int argc, char **argv) {
         print_usage(stdout);
         return 0;
     }
-    if (strcmp(argv[1], "lift") == 0)     return cmd_lift(argc, argv);
     if (strcmp(argv[1], "opt") == 0)      return cmd_opt(argc, argv);
     if (strcmp(argv[1], "verify") == 0)   return cmd_verify(argc, argv);
     if (strcmp(argv[1], "inspect") == 0)  return cmd_inspect(argc, argv);

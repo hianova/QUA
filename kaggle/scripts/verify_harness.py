@@ -456,25 +456,34 @@ def run_official_score(sub_dir: pathlib.Path, verifiers_dir: pathlib.Path, full:
 
 
 def verify_kmb_generic(kmb_path: pathlib.Path, shots: int = 2048) -> None:
-    import re
     circ = km.Circuit.from_file(str(kmb_path))
     stats = circ.operation_statistics()
     regs = [(name, tgts) for name, tgts in circ.register_data.items() if not name.startswith("@")]
     q_regs = [(name, tgts) for name, tgts in regs if all(isinstance(e, km.q) for e in tgts)]
 
-    # Auto-detect exact (input %name ...) list if sibling/examples .qir exists; else schema / fallback
+    # Auto-detect exact input register list if sibling .fir exists; else schema / fallback
     init_regs = None
-    qir_backed = False
-    for cand_qir in [
-        kmb_path.with_suffix(".qir"),
-        kmb_path.parent.parent / "examples" / f"{kmb_path.stem}.qir",
-    ]:
-        if cand_qir.exists():
-            qir_ins = set(re.findall(r"\(\s*input\s+%([^\s\)]+)", cand_qir.read_text()))
-            if qir_ins:
-                init_regs = [(n, t) for n, t in q_regs if n in qir_ins]
-                qir_backed = True
-                break
+    fir_backed = False
+    cand_fir = kmb_path.with_suffix(".fir")
+    if cand_fir.exists():
+        raw_fir = cand_fir.read_bytes()
+        if len(raw_fir) >= 64:
+            hdr = struct.unpack_from("<IIIIIIII", raw_fir, 0)
+            if hdr[0] == 0x31524946:
+                num_vals, num_ins = hdr[4], hdr[5]
+                in_base = 64 + num_vals * 32
+                if len(raw_fir) >= in_base + num_ins * 4:
+                    fir_ins = set()
+                    for idx_i in range(num_ins):
+                        vid = struct.unpack_from("<I", raw_fir, in_base + idx_i * 4)[0]
+                        if vid < num_vals:
+                            v_off = 64 + vid * 32
+                            vname = raw_fir[v_off + 8 : v_off + 32].split(b"\x00", 1)[0].decode("ascii", "ignore")
+                            if vname:
+                                fir_ins.add(vname)
+                    if fir_ins:
+                        init_regs = [(n, t) for n, t in q_regs if n in fir_ins]
+                        fir_backed = True
     if not init_regs:
         q_names = [n for n, _ in q_regs]
         if "selection" in q_names and all(n == "selection" or n.startswith("word_") for n in q_names):
@@ -522,7 +531,7 @@ def verify_kmb_generic(kmb_path: pathlib.Path, shots: int = 2048) -> None:
         sc_drift = int(np.sum(sc1 != sc2))
         if sc_drift != 0:
             raise AssertionError(f"{kmb_path.name}: HMR dual-seed drift on {sc_drift} scratch qubit bits")
-        if not qir_backed:
+        if not fir_backed:
             for label, sc_bits in (("seed1", sc1), ("seed2", sc2)):
                 dirty = sc_bits.any(axis=1)
                 if dirty.any():

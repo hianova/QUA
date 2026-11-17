@@ -11,7 +11,7 @@
 | [qcc_arena.h](qcc_arena.h) | 線性 Arena 配置器、256-bit 位元向量與 128-bit 固定點相位角度輔助運算（Clifford 階層判斷） |
 | [qcc_kmb.h](qcc_kmb.h) | Kickmix `.kmb` v2 二進位格式的雙向編解碼、遊標掃描、精確資源與關鍵路徑計數（`CCX`、`Z_POW`、`T_LIKE`、`HMR`、`D_react`、`D_toff`、`D_circ`）與暫存器管理 |
 | [qir.h](qir.h) | SSA 量子中間表示（QIR）、64-lane 位元切片模擬器 `qir_eval_64`、zero-mask 抽象解釋與組建 API |
-| [qir_dsl.h](qir_dsl.h) | S-expression（`.qir`）雙向解析器與格式化列印器 |
+| [qir_fir.h](qir_fir.h) | `FLOW.Morphism` `.fir` QTT 線性閘口橋接器（嚴格驗證 `.linear` 准入並降階至 QIR） |
 | [qir_lift.h](qir_lift.h) | 無尺度 `.kmb` v2 結構反編譯提升器（支援 `>256` qubit 分塊、Gidney temporary-AND、`LinF2` 與 `phase_poly` 島辨識） |
 | [qir_rewrite.h](qir_rewrite.h) | E-Graph 等價飽和重寫引擎（規則 `R1`–`R11`）、256-bit 線性規範（Gauge）壓縮與 Rank-42 / Rank-27 / Rank-15 $\text{GF}(2^m)$ 代數表建構 |
 | [qir_kernels.h](qir_kernels.h) | 容錯量子核心庫：Gidney temporary-AND、Cuccaro 單輔助受控加減、QROAM/PARITY-LUT、`CSWAP` 筒形位移、`0-CCX` `CZ_IF` 相位內積、3 層代數塔 $\text{GF}(2^{12})$ 反元素（`66`/`69` CCX）與 $\text{GF}(2^8)$ `GF(((2^2)^2)^2)` 代數塔反元素（`36`/`38` CCX，HMR 反計算 `18`/`20` CCX） |
@@ -57,17 +57,16 @@ make FLOW_DIR=../../FLOW clean all test examples
 ```
 
 - `make check-headers` 會同時驗證 `cc -std=c17 -Wall -Wextra -Werror` 與 `c++ -std=c++20 -Wall -Wextra -Werror` 零警告編譯。
-- `make test` 執行 `./build/qcc selftest`，驗證全部 `T1`–`T21`（25 項測試）。
-- `make examples` 編譯並雙種子驗證 [examples/](examples/) 內的 5 個 `.qir` 範例：
-  `adder_csa_phase.qir`、`invsqrt_poly.qir`、`gf12_arith.qir`、`wide_lut_cap.qir`、`invsqrt_phase_oracle.qir`。
+- `make test` 執行 `./build/qcc selftest`，驗證全部 `T1`–`T22` 測試。
+- `make lean-fir examples` 從 [`Qua.lean`](../Qua.lean) 編譯並雙種子驗證全部 `.fir` 目標：
+  `gf256_sbox_mac.fir`、`rev_alu_fxp.fir`、`adder_csa_phase.fir`、`gf12_arith.fir`、`wide_lut_cap.fir`（並驗證拒斥 `.cartesian`）。
 
 ### CLI 指令
 
 ```bash
 ./build/qcc --help
-./build/qcc opt <in.qir|in.kmb> -o <out.kmb> [--max-q N] [--metric default|qc|q2t|qt] [--iters N] [--verify-batches N] [--emit-qir post.qir] [--clean-anc] [--emit-clean-reg]
-./build/qcc lift <in.kmb> -o <out.qir>
-./build/qcc verify <circuit.kmb> [--ref <ref.kmb|ref.qir>] [--states N] [--in-regs N]
+./build/qcc opt <in.kmb|in.fir> -o <out.kmb> [--max-q N] [--metric default|qc|q2t|qt] [--iters N] [--verify-batches N] [--clean-anc] [--emit-clean-reg]
+./build/qcc verify <circuit.kmb> [--ref <ref.kmb|ref.fir>] [--states N] [--in-regs N]
 ./build/qcc inspect <circuit.kmb>
 ./build/qcc selftest
 ```

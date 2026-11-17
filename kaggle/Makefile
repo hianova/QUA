@@ -51,7 +51,7 @@ test: build-synth
 
 verify-qcc: build-synth
 	$(MAKE) -C $(QCC_DIR) FLOW_DIR=$(abspath $(FLOW_DIR)) all test examples
-	$(PYTHON) scripts/verify_harness.py --kmb $(QCC_DIR)/build/adder_csa_phase.kmb $(QCC_DIR)/build/invsqrt_poly.kmb $(QCC_DIR)/build/gf12_arith.kmb $(QCC_DIR)/build/wide_lut_cap.kmb $(QCC_DIR)/build/invsqrt_phase_oracle.kmb
+	$(PYTHON) scripts/verify_harness.py --kmb $(QCC_DIR)/build/adder_csa_phase.kmb $(QCC_DIR)/build/gf12_arith.kmb $(QCC_DIR)/build/wide_lut_cap.kmb $(QCC_DIR)/build/gf256_sbox_mac.kmb $(QCC_DIR)/build/rev_alu_fxp.kmb
 	./$(BUILD_DIR)/qua_synth $(BUILD_DIR) selftest
 	$(QCC_DIR)/build/qcc verify $(BUILD_DIR)/selftest_adder16.kmb
 	$(QCC_DIR)/build/qcc verify $(BUILD_DIR)/selftest_gf2_12_mul.kmb

@@ -6,7 +6,7 @@
 #ifndef QIR_LIFT_H
 #define QIR_LIFT_H
 
-#include "qir_dsl.h"
+#include "qir.h"
 
 #ifdef __cplusplus
 extern "C" {
