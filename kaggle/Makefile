@@ -6,7 +6,7 @@ QCC_DIR  ?= ../qcc
 
 CC       := cc
 CXX      := c++
-CFLAGS   := -std=c17 -O3 -Wall -Wextra -Werror -mcpu=native -I.. -I$(FLOW_DIR) -I$(QCC_DIR) -Isrc
+CFLAGS   := -std=c17 -O3 -Wall -Wextra -Werror -mcpu=native -I.. -I$(FLOW_DIR)/core -I$(FLOW_DIR)/sdk -I$(QCC_DIR) -Isrc
 CXXFLAGS := -std=c++20 -O3 -fno-strict-aliasing -mcpu=native
 PYTHON   := ./.venv/bin/python
 PYTEST   := ./.venv/bin/pytest
@@ -28,10 +28,10 @@ all: build-synth build-bootstrap test
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-build-synth: $(BUILD_DIR) src/qua_synth.c $(wildcard $(QCC_DIR)/qir*.h) $(wildcard $(QCC_DIR)/qcc_*.h) $(FLOW_DIR)/flow.h $(FLOW_DIR)/searu.h $(FLOW_DIR)/flow_opt_params.h
+build-synth: $(BUILD_DIR) src/qua_synth.c $(wildcard $(QCC_DIR)/qir*.h) $(wildcard $(QCC_DIR)/qcc_*.h) $(FLOW_DIR)/core/flow.h $(FLOW_DIR)/core/searu.h $(FLOW_DIR)/core/flow_opt_params.h
 	$(CC) $(CFLAGS) src/qua_synth.c -o $(BUILD_DIR)/qua_synth
 
-build-bootstrap: $(BUILD_DIR) dfthcsos_opt/dft_bootstrap.c $(FLOW_DIR)/flow.h $(FLOW_DIR)/searu.h $(FLOW_DIR)/flow_opt_params.h
+build-bootstrap: $(BUILD_DIR) dfthcsos_opt/dft_bootstrap.c $(FLOW_DIR)/core/flow.h $(FLOW_DIR)/core/searu.h $(FLOW_DIR)/core/flow_opt_params.h
 	$(CC) $(CFLAGS) -DACCELERATE_NEW_LAPACK dfthcsos_opt/dft_bootstrap.c -framework Accelerate -o $(BUILD_DIR)/dft_bootstrap
 
 build-kickmix: $(BUILD_DIR)
