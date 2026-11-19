@@ -361,8 +361,10 @@ static bool pqc_compile_and_verify(
     }
 
     if (kmb_out_path_opt) {
-        if (qcc_kmb_write(&kmb, kmb_out_path_opt) != 0) {
-            fprintf(stderr, "[FAIL] %s: write %s failed\n", label, kmb_out_path_opt);
+        qcc_kmb_fiber_t wf = qcc_kmb_write(&kmb, kmb_out_path_opt);
+        if (wf != QCC_KMB_FIBER_COMMITTED) {
+            fprintf(stderr, "[FAIL] %s: write %s failed (%s, code=%d)\n",
+                    label, kmb_out_path_opt, qcc_kmb_fiber_name(wf), (int)wf);
             qcc_kmb_free(&kmb);
             qir_phys_plan_free(&plan);
             qir_egraph_free(&eg);
@@ -1103,8 +1105,10 @@ static int cmd_analyze(int argc, char **argv) {
     }
 
     qcc_kmb_circuit_t kmb;
-    if (qcc_kmb_read(&kmb, in_path) != 0) {
-        fprintf(stderr, "Error: failed to read %s\n", in_path);
+    qcc_kmb_fiber_t rf = qcc_kmb_read(&kmb, in_path);
+    if (rf != QCC_KMB_FIBER_COMMITTED) {
+        fprintf(stderr, "Error: failed to read %s (%s, code=%d)\n",
+                in_path, qcc_kmb_fiber_name(rf), (int)rf);
         return 1;
     }
     qcc_kmb_stats_t ks;

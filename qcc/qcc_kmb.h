@@ -993,12 +993,29 @@ static inline void qcc__write_u32_pkt(FILE *f, uint64_t pkt_type, const uint32_t
     if (count > 0u) fwrite(arr, sizeof(uint32_t), count, f);
 }
 
-static inline int qcc_kmb_write(const qcc_kmb_circuit_t *c, const char *path) {
+typedef enum {
+    QCC_KMB_FIBER_COMMITTED = 0,
+    QCC_KMB_FIBER_FALLBACK_IO = 1,
+    QCC_KMB_FIBER_FALLBACK_FORMAT = 2,
+    QCC_KMB_FIBER_FALLBACK_INVARIANTS = 3
+} qcc_kmb_fiber_t;
+
+static inline const char *qcc_kmb_fiber_name(qcc_kmb_fiber_t f) {
+    switch (f) {
+    case QCC_KMB_FIBER_COMMITTED:           return "QCC_KMB_FIBER_COMMITTED";
+    case QCC_KMB_FIBER_FALLBACK_IO:         return "QCC_KMB_FIBER_FALLBACK_IO";
+    case QCC_KMB_FIBER_FALLBACK_FORMAT:     return "QCC_KMB_FIBER_FALLBACK_FORMAT";
+    case QCC_KMB_FIBER_FALLBACK_INVARIANTS: return "QCC_KMB_FIBER_FALLBACK_INVARIANTS";
+    default:                                return "QCC_KMB_FIBER_UNKNOWN";
+    }
+}
+
+static inline qcc_kmb_fiber_t qcc_kmb_write(const qcc_kmb_circuit_t *c, const char *path) {
     qcc_kmb_stats_t st;
-    if (!qcc_kmb_recompute_stats(c, &st)) return -2;
+    if (!qcc_kmb_recompute_stats(c, &st)) return QCC_KMB_FIBER_FALLBACK_INVARIANTS;
 
     FILE *f = fopen(path, "wb");
-    if (!f) return -1;
+    if (!f) return QCC_KMB_FIBER_FALLBACK_IO;
 
     uint32_t version = 2u;
     uint32_t nq = st.num_qubits;
@@ -1058,9 +1075,9 @@ static inline int qcc_kmb_write(const qcc_kmb_circuit_t *c, const char *path) {
     if (num_tags > 0u) fwrite(c->info_tag_end_offsets, sizeof(uint64_t), c->num_info_tags, f);
     if (num_tchr > 0u) fwrite(c->info_tag_chars, 1, c->num_info_tag_chars, f);
 
-    int rc = ferror(f) ? -3 : 0;
+    qcc_kmb_fiber_t fiber = ferror(f) ? QCC_KMB_FIBER_FALLBACK_IO : QCC_KMB_FIBER_COMMITTED;
     fclose(f);
-    return rc;
+    return fiber;
 }
 
 static inline bool qcc__read_exact(FILE *f, void *dst, size_t n) {
@@ -1084,10 +1101,10 @@ static inline bool qcc__read_u32_pkt(FILE *f, uint64_t pkt_type, uint32_t **out_
     return qcc__read_exact(f, *out_arr, count * sizeof(uint32_t));
 }
 
-static inline int qcc_kmb_read(qcc_kmb_circuit_t *out, const char *path) {
+static inline qcc_kmb_fiber_t qcc_kmb_read(qcc_kmb_circuit_t *out, const char *path) {
     qcc_kmb_init(out);
     FILE *f = fopen(path, "rb");
-    if (!f) return -1;
+    if (!f) return QCC_KMB_FIBER_FALLBACK_IO;
 
     uint8_t magic[16];
     uint32_t version = 0u, nq = 0u, nb = 0u, nregs = 0u;
@@ -1200,18 +1217,18 @@ static inline int qcc_kmb_read(qcc_kmb_circuit_t *out, const char *path) {
     qcc_kmb_stats_t st;
     if (!qcc_kmb_recompute_stats(out, &st)) {
         qcc_kmb_free(out);
-        return -3;
+        return QCC_KMB_FIBER_FALLBACK_INVARIANTS;
     }
     out->count_toffoli = st.toffoli;
     out->count_t_gate  = st.t_like;
     out->count_z_pow   = st.z_pow;
     out->count_hmr     = st.hmr;
-    return 0;
+    return QCC_KMB_FIBER_COMMITTED;
 
 fail:
     fclose(f);
     qcc_kmb_free(out);
-    return -2;
+    return QCC_KMB_FIBER_FALLBACK_FORMAT;
 }
 
 #ifdef __cplusplus

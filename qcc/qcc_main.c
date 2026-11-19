@@ -48,8 +48,10 @@ static int cmd_inspect(int argc, char **argv) {
         return 2;
     }
     qcc_kmb_circuit_t kmb;
-    if (qcc_kmb_read(&kmb, in_path) != 0) {
-        fprintf(stderr, "Error: failed to read %s\n", in_path);
+    qcc_kmb_fiber_t rf = qcc_kmb_read(&kmb, in_path);
+    if (rf != QCC_KMB_FIBER_COMMITTED) {
+        fprintf(stderr, "Error: failed to read %s (%s, code=%d)\n",
+                in_path, qcc_kmb_fiber_name(rf), (int)rf);
         return 1;
     }
     qcc_kmb_stats_t st;
@@ -121,9 +123,13 @@ static int cmd_opt(int argc, char **argv) {
 
     if (qcc__ends_with(in_path, ".kmb")) {
         qcc_kmb_circuit_t kmb;
-        if (qcc_kmb_read(&kmb, in_path) == 0) {
+        qcc_kmb_fiber_t rf = qcc_kmb_read(&kmb, in_path);
+        if (rf == QCC_KMB_FIBER_COMMITTED) {
             ok = qir_lift_from_kmb(&mod, &arena, &kmb, "lifted_opt", NULL);
             qcc_kmb_free(&kmb);
+        } else {
+            fprintf(stderr, "Error: failed to read %s (%s, code=%d)\n",
+                    in_path, qcc_kmb_fiber_name(rf), (int)rf);
         }
     } else if (qcc__ends_with(in_path, ".fir")) {
         ok = qir_load_fir_file(&mod, &arena, in_path);
@@ -163,8 +169,10 @@ static int cmd_opt(int argc, char **argv) {
     qcc_kmb_stats_t final_st;
     qcc_kmb_recompute_stats(&out_kmb, &final_st);
 
-    if (qcc_kmb_write(&out_kmb, out_path) != 0) {
-        fprintf(stderr, "Error: failed to write %s\n", out_path);
+    qcc_kmb_fiber_t wf = qcc_kmb_write(&out_kmb, out_path);
+    if (wf != QCC_KMB_FIBER_COMMITTED) {
+        fprintf(stderr, "Error: failed to write %s (%s, code=%d)\n",
+                out_path, qcc_kmb_fiber_name(wf), (int)wf);
         qcc_kmb_free(&out_kmb);
         qir_phys_plan_free(&plan);
         qir_egraph_free(&eg);
@@ -237,8 +245,10 @@ static int cmd_verify(int argc, char **argv) {
     }
 
     qcc_kmb_circuit_t cand;
-    if (qcc_kmb_read(&cand, cand_path) != 0) {
-        fprintf(stderr, "Error: failed to read %s\n", cand_path);
+    qcc_kmb_fiber_t rf = qcc_kmb_read(&cand, cand_path);
+    if (rf != QCC_KMB_FIBER_COMMITTED) {
+        fprintf(stderr, "Error: failed to read %s (%s, code=%d)\n",
+                cand_path, qcc_kmb_fiber_name(rf), (int)rf);
         return 1;
     }
     qcc_kmb_stats_t cst;
@@ -329,8 +339,10 @@ static int cmd_verify(int argc, char **argv) {
 
     if (qcc__ends_with(ref_path, ".kmb")) {
         qcc_kmb_circuit_t ref;
-        if (qcc_kmb_read(&ref, ref_path) != 0) {
-            fprintf(stderr, "Error: failed to read ref %s\n", ref_path);
+        qcc_kmb_fiber_t ref_rf = qcc_kmb_read(&ref, ref_path);
+        if (ref_rf != QCC_KMB_FIBER_COMMITTED) {
+            fprintf(stderr, "Error: failed to read ref %s (%s, code=%d)\n",
+                    ref_path, qcc_kmb_fiber_name(ref_rf), (int)ref_rf);
             qcc_kmb_free(&cand);
             return 1;
         }
@@ -565,7 +577,13 @@ static int cmd_selftest(void) {
         qcc_kmb_info_tag(&k1, "@exit:test");
 
         const char *tmp = "/tmp/qcc_selftest_rt.kmb";
-        if (qcc_kmb_write(&k1, tmp) != 0 || qcc_kmb_read(&k2, tmp) != 0 ||
+        qcc_kmb_circuit_t k_missing;
+        qcc_kmb_fiber_t miss_f = qcc_kmb_read(&k_missing, "/tmp/qcc_selftest_missing_404.kmb");
+        qcc_kmb_free(&k_missing);
+        if (miss_f != QCC_KMB_FIBER_FALLBACK_IO ||
+            strcmp(qcc_kmb_fiber_name(miss_f), "QCC_KMB_FIBER_FALLBACK_IO") != 0 ||
+            qcc_kmb_write(&k1, tmp) != QCC_KMB_FIBER_COMMITTED ||
+            qcc_kmb_read(&k2, tmp) != QCC_KMB_FIBER_COMMITTED ||
             k1.num_ops != k2.num_ops || k1.num_info_tags != k2.num_info_tags ||
             memcmp(k1.op_types, k2.op_types, k1.num_ops) != 0) {
             printf("  FAIL [T1 .kmb round-trip]\n");

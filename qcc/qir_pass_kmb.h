@@ -510,9 +510,9 @@ static inline bool qcc_compile_module_to_file(
             return false;
         }
     }
-    int wr = qcc_kmb_write(&kmb, kmb_path);
+    qcc_kmb_fiber_t wf = qcc_kmb_write(&kmb, kmb_path);
     qcc_kmb_free(&kmb);
-    return (wr == 0);
+    return (wf == QCC_KMB_FIBER_COMMITTED);
 }
 
 #ifdef __cplusplus
