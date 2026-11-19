@@ -1,6 +1,6 @@
 # `qcc` — QCC v3 通用容錯量子電路編譯器
 
-**QCC v3 (Quantum Circuit Compiler)** 是一套純 C17（且所有標頭皆相容 C++20 `-Wall -Wextra -Werror`）、零外部執行期依賴的容錯量子電路編譯器，建立於 `FLOW v7.0.1` 與 `SEARU` 之上（透過 `FLOW_DIR` 引用，無須複製標頭檔）。
+**QCC v3 (Quantum Circuit Compiler)** 是一套純 C17（且所有標頭皆相容 C++20 `-Wall -Wextra -Werror`）、零外部執行期依賴的容錯量子電路編譯器，建立於 `FLOW v8.0.0`（`core/` + `sdk/`）與 `SEARU` 之上（透過 `FLOW_DIR` 引用，無須複製標頭檔）。
 
 ---
 
@@ -19,7 +19,7 @@
 | [qir_opt.h](qir_opt.h) | `SEARU` × `FLOW` 2-Jet 混合最佳化、$O(N \log N)$ 最大堆積零垃圾級聯反計算、in-place/線路借用排程（支援至 65,536 qubits 與大規模電路快速重寫播種） |
 | [qir_pass_kmb.h](qir_pass_kmb.h) | 閘級 `.kmb` 相位融合/自我反元素對消、`@clean` 裁剪壓縮，以及統一高階編譯 API（`qcc_compile_module_to_kmb` / `qcc_compile_module_to_file`） |
 | [qir_verify.h](qir_verify.h) | 雙種子 `.kmb` / QIR 等價與無相位回踢驗證器（支援經典輸入、分離式 `init_mask`/`cmp_mask` 遮罩與容許近似誤差驗證） |
-| [qcc_main.c](qcc_main.c) | CLI 工具（`opt` / `lift` / `verify` / `inspect` / `selftest`）與 `T1`–`T21` 自我測試套件（25 項測試） |
+| [qcc_main.c](qcc_main.c) | CLI 工具（`opt` / `lift` / `verify` / `inspect` / `selftest`）與 `T1`–`T22` 自我測試套件（27 項測試） |
 
 ---
 
@@ -52,14 +52,14 @@
 ### 建置與執行測試
 
 ```bash
-cd /Users/kuangtalin/Documents/QUA/qcc
+cd qcc
 make FLOW_DIR=../../FLOW clean all test examples
 ```
 
 - `make check-headers` 會同時驗證 `cc -std=c17 -Wall -Wextra -Werror` 與 `c++ -std=c++20 -Wall -Wextra -Werror` 零警告編譯。
-- `make test` 執行 `./build/qcc selftest`，驗證全部 `T1`–`T22` 測試。
-- `make lean-fir examples` 從 [`Qua.lean`](../Qua.lean) 編譯並雙種子驗證全部 `.fir` 目標：
-  `gf256_sbox_mac.fir`、`rev_alu_fxp.fir`、`adder_csa_phase.fir`、`gf12_arith.fir`、`wide_lut_cap.fir`（並驗證拒斥 `.cartesian`）。
+- `make test` 執行 `./build/qcc selftest`，驗證全部 `T1`–`T22`（27 項）測試。
+- `make lean-fir examples` 從 [`Qua.lean`](../Qua.lean) 編譯並以 `FLOW fir-synth` 合成與雙種子驗證全部 `.fir` 目標：
+  `gf256_sbox_mac.fir`、`rev_alu_fxp.fir`、`adder_csa_phase.fir`、`gf12_arith.fir`、`wide_lut_cap.fir`、`gf256_tower_spec.fir` $\to$ `gf256_tower_{a32,d4}.fir`（`CCX: 92 -> 32/33`, `T-depth: 88 -> 6`）、`lut5_bijection_spec.fir` $\to$ `lut5_bijection_opt.fir`（`CCX: 21 -> 5`, `T-depth: 13 -> 1`），並驗證拒斥 `.cartesian` 及與 `../ELE` 的 6 份跨專案 `.fir` 位元組一致性。
 
 ### CLI 指令
 

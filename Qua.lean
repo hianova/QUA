@@ -2,8 +2,8 @@
   QUA — Pure Quantum Circuit Parameter Config (`import Flow`, 0 Custom Theorems)
   ==============================================================================
   SSOT compliance: all QTT linearity proofs and `.fir` Morphism IR encoders live
-  in domain-free `../FLOW/Flow/*.lean`.
-  This file configures QUA circuits via `Flow.Morphism.Builder`, emits two
+  in domain-free `../FLOW/{core,sdk}/lean/Flow/*.lean`.
+  This file configures QUA circuits via `Flow.Morphism.Builder`, emits seven
   `.linear` quantum targets + one `.cartesian` guard witness, and relies on
   `Flow.Morphism.emitFirChecked` (`wf = true := by decide`) with 0 theorems.
 -/

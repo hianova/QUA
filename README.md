@@ -1,12 +1,12 @@
 # `QUA` — QCC v3 通用量子電路編譯器、PQC / NIST 量子密碼分析資源編譯器與 Kaggle 驗證工作區
 
-本儲存庫整合純 C17（C++20 標頭相容）容錯量子電路編譯器 **QCC v3**、**PQC / NIST 安全基準量子密碼分析資源編譯器**、統一 `FLOW v8.0.0` SSOT 介面（[`Qua.lean`](Qua.lean) + [`qcc/qir_fir.h`](qcc/qir_fir.h)）與 Google Quantum AI 競賽驗證管線，並透過相鄰目錄 `../FLOW`（依 `FLOW_DIR` 指定）引用 `Flow.lean`、`flow.h`、`searu.h`、`flow_opt_params.h` 與 `flow_ir.h`。
+本儲存庫整合純 C17（C++20 標頭相容）容錯量子電路編譯器 **QCC v3**、**PQC / NIST 安全基準量子密碼分析資源編譯器**、統一 `FLOW v8.0.0` SSOT 介面（[`Qua.lean`](Qua.lean) + [`qcc/qir_fir.h`](qcc/qir_fir.h)）與 Google Quantum AI 競賽驗證管線，並透過相鄰目錄 `../FLOW`（依 `FLOW_DIR` 指定）引用 `core/`（`flow.h`、`searu.h`、`flow_opt_params.h`）與 `sdk/`（`flow_ir.h`、`searu_mc_gf2.h`、`flow_ir_synth.h`、`lean/Flow.lean`）。
 
 ---
 
 ## 目錄結構
 
-- [`Qua.lean`](Qua.lean)：純參數配置檔（`import Flow`，`0` 本地定理、`0` 自訂序列化），以 `Flow.Morphism.Builder` 宣告並透過 `emitFirChecked` 產出 `.linear` 量子算子圖（`gf256_sbox_mac.fir`、`rev_alu_fxp.fir`、`adder_csa_phase.fir`、`gf12_arith.fir`、`wide_lut_cap.fir`）與 `.cartesian` 拒斥見證（`cartesian_reject.fir`）
+- [`Qua.lean`](Qua.lean)：純參數配置檔（`import Flow`，`0` 本地定理、`0` 自訂序列化），以 `Flow.Morphism.Builder` 宣告並透過 `emitFirChecked` 產出 `.linear` 量子算子圖（`gf256_sbox_mac.fir`、`rev_alu_fxp.fir`、`adder_csa_phase.fir`、`gf12_arith.fir`、`wide_lut_cap.fir`、`gf256_tower_spec.fir`、`lut5_bijection_spec.fir`）、經 `FLOW fir-synth` 合成 SEARU 低乘法度與深度的 `gf256_tower_{a32,d4}.fir` 及 `lut5_bijection_opt.fir`（並驗證與相鄰 `../ELE` 位元組完全一致），以及 `.cartesian` 拒斥見證（`cartesian_reject.fir`）
 - [`qcc/`](qcc/README.md)：**QCC v3 通用容錯量子電路編譯器**
   - `.kmb` v2 雙向編解碼、關鍵路徑 `D_toff` / `D_circ` 統計（[`qcc_kmb.h`](qcc/qcc_kmb.h)）、Arena 與 256-bit / 128-bit 基礎元件（[`qcc_arena.h`](qcc/qcc_arena.h)）
   - SSA QIR（[`qir.h`](qcc/qir.h)）、統一 `.fir` QTT 線性閘口橋接器（[`qir_fir.h`](qcc/qir_fir.h)，拒斥 `.cartesian` 並降階 `.linear` 至 QIR）、無尺度 `>256` qubit 反編譯提升（[`qir_lift.h`](qcc/qir_lift.h)）
@@ -24,15 +24,14 @@
 
 ## 依賴設定
 
-- 預設透過 `FLOW_DIR ?= ../FLOW`（於子目錄執行時為 `../../FLOW`）引用隔壁目錄的 `flow.h`、`searu.h` 與 `flow_opt_params.h`，若 `FLOW` 位於其他位置可於執行 `make` 時覆寫 `FLOW_DIR=/path/to/FLOW`。
+- 預設透過 `FLOW_DIR ?= ../FLOW`（於子目錄執行時為 `../../FLOW`）引用隔壁目錄的 `core/{flow.h,searu.h,flow_opt_params.h}` 與 `sdk/{flow_ir.h,searu_mc_gf2.h,flow_ir_synth.h}`，若 `FLOW` 位於其他位置可於執行 `make` 時覆寫 `FLOW_DIR=/path/to/FLOW`。
 
 ---
 
 ## 常用指令
 
 ```bash
-cd /Users/kuangtalin/Documents/QUA
-make qcc              # 檢查 C17/C++20 標頭相容性，執行 qcc T1..T21 自測與 5 個範例驗證
+make qcc              # 檢查 C17/C++20 標頭相容性，執行 qcc T1..T22 (27 項) 自測與 SEARU .fir 驗證
 make pqc              # 編譯 pqc 並執行 KAT + 64-lane 雙種子自測與 qcc verify
 make -C pqc bench     # 產出全系列 PQC/NIST 基準 .kmb、build/pqc_report.json 與 build/pqc_report.md
 make all              # 編譯 qcc、pqc 與 kaggle 執行檔

@@ -52,7 +52,7 @@
 ## 建置與執行指令
 
 ```bash
-cd /Users/kuangtalin/Documents/QUA/pqc
+cd pqc
 make all      # 編譯 build/pqc
 make test     # 執行 C17/C++20 標頭檢查、KAT + 64-lane 雙種子自測與 qcc verify
 make bench    # 編譯全系列基準並輸出 build/*.kmb、build/pqc_report.json 與 build/pqc_report.md
