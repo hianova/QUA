@@ -6,7 +6,7 @@
 
 ## 目錄結構
 
-- [`Qua.lean`](Qua.lean)：純參數配置檔（`import Flow`，`0` 本地定理、`0` 自訂序列化），以 `Flow.Morphism.Builder` 宣告並透過 `emitFirChecked` 產出 `.linear` 量子算子圖（`gf256_sbox_mac.fir`、`rev_alu_fxp.fir`、`adder_csa_phase.fir`、`gf12_arith.fir`、`wide_lut_cap.fir`、`gf256_tower_spec.fir`、`lut5_bijection_spec.fir`）、經 `FLOW fir-synth` 合成 SEARU 低乘法度與深度的 `gf256_tower_{a32,d4}.fir` 及 `lut5_bijection_opt.fir`（並驗證與相鄰 `../ELE` 位元組完全一致），以及 `.cartesian` 拒斥見證（`cartesian_reject.fir`）
+- [`Qua.lean`](Qua.lean)：純參數配置檔（`import Flow.Morphism` / `Flow.Canonical`，`0` 本地定理、`0` 自訂序列化），透過 `Flow.Canonical` 單一來源與 `Flow.Morphism.Builder` + `emitFirChecked` 產出 `.linear` 量子算子圖（`gf256_sbox_mac.fir`、`rev_alu_fxp.fir`、`adder_csa_phase.fir`、`gf12_arith.fir`、`wide_lut_cap.fir`、`gf256_tower_spec.fir`、`lut5_bijection_spec.fir`）、經 `FLOW fir-synth` 合成 SEARU 低乘法度與深度的 `gf256_tower_{a32,d4}.fir` 及 `lut5_bijection_opt.fir`（與 `../ELE` 同源並驗證位元組完全一致），以及 `.cartesian` 拒斥見證（`cartesian_reject.fir`）
 - [`qcc/`](qcc/README.md)：**QCC v3 通用容錯量子電路編譯器**
   - `.kmb` v2 雙向編解碼、關鍵路徑 `D_toff` / `D_circ` 統計（[`qcc_kmb.h`](qcc/qcc_kmb.h)）、Arena 與 256-bit / 128-bit 基礎元件（[`qcc_arena.h`](qcc/qcc_arena.h)）
   - SSA QIR（[`qir.h`](qcc/qir.h)）、統一 `.fir` QTT 線性閘口橋接器（[`qir_fir.h`](qcc/qir_fir.h)，拒斥 `.cartesian` 並降階 `.linear` 至 QIR）、無尺度 `>256` qubit 反編譯提升（[`qir_lift.h`](qcc/qir_lift.h)）

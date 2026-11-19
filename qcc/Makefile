@@ -17,7 +17,7 @@ all: $(TARGET)
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(TARGET): qcc_main.c $(HDRS) $(FLOW_DIR)/core/flow.h $(FLOW_DIR)/core/searu.h $(FLOW_DIR)/core/flow_opt_params.h $(FLOW_DIR)/sdk/flow_ir.h | $(BUILD)
+$(TARGET): qcc_main.c $(HDRS) $(FLOW_DIR)/core/flow.h $(FLOW_DIR)/core/searu.h $(FLOW_DIR)/core/flow_opt_params.h $(FLOW_DIR)/sdk/flow_ir_wire.h $(FLOW_DIR)/sdk/flow_ir.h | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ qcc_main.c
 
 check-headers:
