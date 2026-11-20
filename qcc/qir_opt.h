@@ -1656,7 +1656,7 @@ static inline bool qir_optimize_module(
                     0u, 0u, 0u, 0u
                 };
                 uint64_t st_out[8] = {0};
-                flow_step_atlas(st_out, st_in, flow_arena, 31u, pressure, 0u);
+                flow_step_atlas(st_out, st_in, (const flow_cell *)flow_arena, 31u, pressure, 0u);
                 int64_t x_next   = (int64_t)(int32_t)(uint32_t)st_out[3];
                 int64_t w_next_s = (x_next + (FLOW_Q16_ONE / 2)) >> FLOW_Q16_SHIFT;
                 if (w_next_s < (int64_t)min_keep) w_next_s = (int64_t)min_keep;

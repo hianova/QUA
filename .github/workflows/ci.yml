@@ -1,0 +1,49 @@
+name: CI
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  push:
+    branches: [ main, "feat/**", "refactor/**" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify-qua:
+    name: QCC + PQC + Lean-FIR Verification (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
+    steps:
+      - name: Checkout FLOW (main)
+        uses: actions/checkout@v4
+        with:
+          repository: hianova/FLOW
+          ref: main
+          path: FLOW
+
+      - name: Checkout QUA
+        uses: actions/checkout@v4
+        with:
+          path: QUA
+
+      - name: Install Lean 4 Toolchain
+        run: |
+          curl -sSf https://raw.githubusercontent.com/elanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:v4.36.0
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Install Clang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Build FLOW & Run QUA QCC + PQC + Lean-FIR Gates
+        run: |
+          export PATH="$HOME/.elan/bin:$PATH"
+          make -C FLOW all CC=clang CXX=clang++
+          make -C QUA qcc pqc CC=clang CXX=clang++
