@@ -44,3 +44,10 @@ make clean            # 清除編譯產物
 ```bash
 make -C kaggle stage-init stage-sync score pack
 ```
+
+---
+
+## CI 驗證範圍
+
+- GitHub Actions CI（`ubuntu-latest` + `macos-latest`）執行可攜核心閘道 `make qcc pqc`：包含 **QCC v3** `T1`–`T22`（27 項）與 `lean-fir` 跨界同圖雙投影驗證，以及 **PQC / NIST** KAT + 64-lane 雙種子自測。
+- [`kaggle/`](kaggle/README.md) 內含依賴 macOS `Accelerate` 框架之張量/Givens 最佳化與本地競賽驗證器，定位為本機端執行與驗證工作區。
