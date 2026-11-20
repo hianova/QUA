@@ -3,6 +3,9 @@
  * Uses ONLY declarative QIR builders (pqc_oracles.h) compiled via QCC (qir_pass_kmb.h).
  * Pure C17, zero <math.h>, zero raw qcc_kmb_* gate emission calls.
  */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "qir_pass_kmb.h"
 #include "qir_verify.h"
 #include "pqc_oracles.h"
