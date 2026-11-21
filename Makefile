@@ -1,6 +1,6 @@
 FLOW_DIR ?= ../FLOW
 
-.PHONY: all qcc pqc kaggle test clean
+.PHONY: all qcc pqc qctrl kaggle test clean
 
 all: qcc pqc
 	$(MAKE) -C kaggle FLOW_DIR=$(abspath $(FLOW_DIR)) build-synth build-bootstrap
@@ -10,6 +10,9 @@ qcc:
 
 pqc:
 	$(MAKE) -C pqc FLOW_DIR=$(abspath $(FLOW_DIR)) all test
+
+qctrl:
+	$(MAKE) -C qctrl FLOW_DIR=$(abspath $(FLOW_DIR)) test demo
 
 kaggle:
 	$(MAKE) -C kaggle FLOW_DIR=$(abspath $(FLOW_DIR)) all
