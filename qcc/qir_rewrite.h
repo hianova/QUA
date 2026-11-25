@@ -671,7 +671,7 @@ static inline void qir_egraph_free(qir_egraph_t *eg) {
 /* R7 Helper: Rank-compress + affine zero-shift a LUT over F_2 (sound for all <=256-bit outputs) */
 static inline qir_gauge_lut_t *qir__build_gauge_lut(qcc_arena_t *arena, const qir_lut_payload_t *lut) {
     if (!lut || lut->num_entries == 0u || lut->val_bits == 0u || lut->val_bits > QIR_MAX_VAL_BITS) return NULL;
-    qir_gauge_lut_t *g = (qir_gauge_lut_t *)qcc_arena_alloc_zero(arena, sizeof(qir_gauge_lut_t), 8u);
+    qir_gauge_lut_t *g = (qir_gauge_lut_t *)qcc_arena_xalloc_zero(arena, sizeof(qir_gauge_lut_t), 8u);
     g->val_bits    = lut->val_bits;
     g->val_words   = lut->val_words;
     g->num_entries = lut->num_entries;
@@ -682,9 +682,9 @@ static inline qir_gauge_lut_t *qir__build_gauge_lut(qcc_arena_t *arena, const qi
     /* Pivot columns over shifted rows d[e] = T[e] ^ T[0] */
     uint16_t piv_col[QIR_MAX_VAL_BITS];
     uint16_t rank = 0u;
-    uint32_t *piv_entry = (uint32_t *)calloc(lut->val_bits, sizeof(uint32_t));
+    uint32_t *piv_entry = (uint32_t *)qcc_xcalloc(lut->val_bits, sizeof(uint32_t));
     /* Greedy basis selection over F_2 rows of (T[e] ^ T[0]) */
-    uint8_t *col_used = (uint8_t *)calloc(lut->val_bits, 1u);
+    uint8_t *col_used = (uint8_t *)qcc_xcalloc(lut->val_bits, 1u);
     for (uint16_t c = 0u; c < lut->val_bits; ++c) {
         uint64_t any = 0u;
         uint16_t cw = c >> 6u, cb = c & 63u;
@@ -702,8 +702,8 @@ static inline qir_gauge_lut_t *qir__build_gauge_lut(qcc_arena_t *arena, const qi
 
     /* Run exact F_2 RREF on (T[e] ^ T[0]) over arbitrary <= 256 bits to find minimal rank basis! */
     {
-        qcc_bv256_t *basis_vecs = (qcc_bv256_t *)calloc(lut->val_bits, sizeof(qcc_bv256_t));
-        uint16_t *true_piv_bits = (uint16_t *)calloc(lut->val_bits, sizeof(uint16_t));
+        qcc_bv256_t *basis_vecs = (qcc_bv256_t *)qcc_xcalloc(lut->val_bits, sizeof(qcc_bv256_t));
+        uint16_t *true_piv_bits = (uint16_t *)qcc_xcalloc(lut->val_bits, sizeof(uint16_t));
         uint16_t true_rank = 0u;
         uint16_t vw = lut->val_words;
         for (uint32_t e = 1u; e < lut->num_entries && true_rank < lut->val_bits; ++e) {
@@ -739,8 +739,8 @@ static inline qir_gauge_lut_t *qir__build_gauge_lut(qcc_arena_t *arena, const qi
             g->rank_bits  = true_rank;
             g->comp_words = (uint16_t)((true_rank + 63u) / 64u);
             if (g->comp_words == 0u) g->comp_words = 1u;
-            g->comp_table = (uint64_t *)qcc_arena_alloc_zero(arena, (size_t)lut->num_entries * g->comp_words * sizeof(uint64_t), 8u);
-            g->recon_rows = (qcc_bv256_t *)qcc_arena_alloc_zero(arena, (size_t)lut->val_bits * sizeof(qcc_bv256_t), 8u);
+            g->comp_table = (uint64_t *)qcc_arena_xalloc_zero(arena, (size_t)lut->num_entries * g->comp_words * sizeof(uint64_t), 8u);
+            g->recon_rows = (qcc_bv256_t *)qcc_arena_xalloc_zero(arena, (size_t)lut->val_bits * sizeof(qcc_bv256_t), 8u);
             for (uint32_t e = 0u; e < lut->num_entries; ++e) {
                 for (uint16_t r = 0u; r < true_rank; ++r) {
                     uint16_t pc = true_piv_bits[r];
@@ -767,8 +767,8 @@ static inline qir_gauge_lut_t *qir__build_gauge_lut(qcc_arena_t *arena, const qi
     /* Zero-column strip fallback for arbitrary <= 256 bits */
     g->rank_bits  = rank ? rank : 1u;
     g->comp_words = (uint16_t)((g->rank_bits + 63u) / 64u);
-    g->comp_table = (uint64_t *)qcc_arena_alloc_zero(arena, (size_t)lut->num_entries * g->comp_words * sizeof(uint64_t), 8u);
-    g->recon_rows = (qcc_bv256_t *)qcc_arena_alloc_zero(arena, (size_t)lut->val_bits * sizeof(qcc_bv256_t), 8u);
+    g->comp_table = (uint64_t *)qcc_arena_xalloc_zero(arena, (size_t)lut->num_entries * g->comp_words * sizeof(uint64_t), 8u);
+    g->recon_rows = (qcc_bv256_t *)qcc_arena_xalloc_zero(arena, (size_t)lut->val_bits * sizeof(qcc_bv256_t), 8u);
     for (uint32_t e = 0u; e < lut->num_entries; ++e) {
         for (uint16_t r = 0u; r < rank; ++r) {
             uint16_t oc = piv_col[r];
@@ -927,15 +927,15 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
                     cur_op = prev;
                 }
                 if (n_folded > 0u) {
-                    qir_linf2_payload_t *fused = (qir_linf2_payload_t *)qcc_arena_alloc_zero(
+                    qir_linf2_payload_t *fused = (qir_linf2_payload_t *)qcc_arena_xalloc_zero(
                         arena, sizeof(qir_linf2_payload_t), 8u);
                     fused->out_bits  = cur_out;
                     fused->in_bits   = cur_in;
                     fused->const_vec = cur_c;
-                    fused->rows      = (qcc_bv256_t *)qcc_arena_alloc_zero(
+                    fused->rows      = (qcc_bv256_t *)qcc_arena_xalloc_zero(
                         arena, (size_t)cur_out * sizeof(qcc_bv256_t), 8u);
                     memcpy(fused->rows, cur_rows, (size_t)cur_out * sizeof(qcc_bv256_t));
-                    uint32_t *ch = (uint32_t *)qcc_arena_alloc(arena, (size_t)n_folded * sizeof(uint32_t), 4u);
+                    uint32_t *ch = (uint32_t *)qcc_arena_xalloc(arena, (size_t)n_folded * sizeof(uint32_t), 4u);
                     memcpy(ch, folded, (size_t)n_folded * sizeof(uint32_t));
                     r1.fused_linf2   = fused;
                     r1.chain_ops     = ch;
@@ -1044,7 +1044,7 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
                 qir_enode_t r3 = node;
                 r3.variant   = QIR_VAR_CSA_TREE;
                 r3.rule_tag  = 3u;
-                uint32_t *chain = (uint32_t *)qcc_arena_alloc(arena, (size_t)nc * sizeof(uint32_t), 4u);
+                uint32_t *chain = (uint32_t *)qcc_arena_xalloc(arena, (size_t)nc * sizeof(uint32_t), 4u);
                 for (uint16_t k = 0u; k < nc; ++k) chain[k] = chain_tmp[nc - 1u - k];
                 r3.chain_ops     = chain;
                 r3.num_chain_ops = nc;
@@ -1100,7 +1100,7 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
                     }
                 }
                 if (tree_ok && n_folded >= 1u) {
-                    qir_phase_split_t *ps = (qir_phase_split_t *)qcc_arena_alloc_zero(
+                    qir_phase_split_t *ps = (qir_phase_split_t *)qcc_arena_xalloc_zero(
                         arena, sizeof(qir_phase_split_t), 16u);
                     ps->target_val = v_in;
                     ps->bit_lo     = bit_lo_out;
@@ -1111,7 +1111,7 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
                         ps->leaf_vals[li]  = leaves[li];
                         ps->leaf_signs[li] = lsigns[li];
                     }
-                    uint32_t *ch = (uint32_t *)qcc_arena_alloc(arena, (size_t)n_folded * sizeof(uint32_t), 4u);
+                    uint32_t *ch = (uint32_t *)qcc_arena_xalloc(arena, (size_t)n_folded * sizeof(uint32_t), 4u);
                     memcpy(ch, folded, (size_t)n_folded * sizeof(uint32_t));
                     qir_enode_t r4_ph = node;
                     r4_ph.variant       = QIR_VAR_PHASE_CSA_DIRECT;
@@ -1147,7 +1147,7 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
                 uint32_t cdef = mod->vals[cvid].def_op;
                 if (cdef != UINT32_MAX && mod->ops[cdef].kind == QIR_OP_CONST &&
                     mod->ops[cdef].pred_val == UINT32_MAX && eg->classes[cvid].use_count == 1u) {
-                    uint32_t *ch = (uint32_t *)qcc_arena_alloc(arena, sizeof(uint32_t), 4u);
+                    uint32_t *ch = (uint32_t *)qcc_arena_xalloc(arena, sizeof(uint32_t), 4u);
                     ch[0] = cdef;
                     r9.chain_ops     = ch;
                     r9.num_chain_ops = 1u;
@@ -1208,10 +1208,10 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
                 uint16_t dm = op->u.gf2m.m;
                 uint32_t dmask = (dm == 32u) ? UINT32_MAX : ((UINT32_C(1) << dm) - 1u);
                 uint32_t celem = (uint32_t)(mod->vals[cvid].const_val[0] & dmask);
-                qir_linf2_payload_t *lf = (qir_linf2_payload_t *)qcc_arena_alloc_zero(arena, sizeof(qir_linf2_payload_t), 8u);
+                qir_linf2_payload_t *lf = (qir_linf2_payload_t *)qcc_arena_xalloc_zero(arena, sizeof(qir_linf2_payload_t), 8u);
                 lf->in_bits  = dm;
                 lf->out_bits = dm;
-                lf->rows     = (qcc_bv256_t *)qcc_arena_alloc_zero(arena, dm * sizeof(qcc_bv256_t), 8u);
+                lf->rows     = dm ? (qcc_bv256_t *)qcc_arena_xalloc_zero(arena, dm * sizeof(qcc_bv256_t), 8u) : NULL;
                 for (uint16_t c = 0u; c < dm; ++c) {
                     uint32_t col = qir__gf2m_mul_u32(celem, UINT32_C(1) << c, dm, op->u.gf2m.irred_poly);
                     for (uint16_t r = 0u; r < dm; ++r) {
@@ -1226,7 +1226,7 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
                 uint32_t cdef = mod->vals[cvid].def_op;
                 if (cdef != UINT32_MAX && mod->ops[cdef].kind == QIR_OP_CONST &&
                     mod->ops[cdef].pred_val == UINT32_MAX && eg->classes[cvid].use_count == 1u) {
-                    uint32_t *ch = (uint32_t *)qcc_arena_alloc(arena, sizeof(uint32_t), 4u);
+                    uint32_t *ch = (uint32_t *)qcc_arena_xalloc(arena, sizeof(uint32_t), 4u);
                     ch[0] = cdef;
                     r11.chain_ops     = ch;
                     r11.num_chain_ops = 1u;
@@ -1271,7 +1271,7 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
                         is_sub  = true;
                     }
                     if (lhs_vid != UINT32_MAX && lhs_vid != v_false && mod->vals[lhs_vid].width > 0u) {
-                        uint32_t *ch = (uint32_t *)qcc_arena_alloc(arena, sizeof(uint32_t), 4u);
+                        uint32_t *ch = (uint32_t *)qcc_arena_xalloc(arena, sizeof(uint32_t), 4u);
                         ch[0] = dop->id;
                         qir_enode_t r10b = node;
                         r10b.variant       = QIR_VAR_CTRL_ADD_CUCCARO;
@@ -1301,7 +1301,7 @@ static inline bool qir_egraph_build_and_saturate(qir_egraph_t *eg, qcc_arena_t *
                 }
                 const qir_op_t *dop = &mod->ops[def_id];
                 if (dop->pred_val != UINT32_MAX || dop->num_outs != 1u) continue;
-                uint32_t *ch = (uint32_t *)qcc_arena_alloc(arena, sizeof(uint32_t), 4u);
+                uint32_t *ch = (uint32_t *)qcc_arena_xalloc(arena, sizeof(uint32_t), 4u);
                 ch[0] = dop->id;
                 if (dop->kind == QIR_OP_LUT_ROM && dop->u.lut.val_bits == ow) {
                     const qir_lut_payload_t *dl = &dop->u.lut;

@@ -495,12 +495,12 @@ static inline void qk_linf2_inplace(
     const qcc_bv256_t *const_vec
 ) {
     if (w == 0u || w > QIR_MAX_VAL_BITS) return;
-    qcc_bv256_t *A = (qcc_bv256_t *)malloc((size_t)w * sizeof(qcc_bv256_t));
+    qcc_bv256_t *A = (qcc_bv256_t *)qcc_xmalloc((size_t)w * sizeof(qcc_bv256_t));
     memcpy(A, rows, (size_t)w * sizeof(qcc_bv256_t));
 
     typedef struct { uint8_t kind; uint16_t a, b; } step_t;
     size_t cap = 4096u, nops = 0u;
-    step_t *ops = (step_t *)malloc(cap * sizeof(step_t));
+    step_t *ops = (step_t *)qcc_xmalloc(cap * sizeof(step_t));
 
     for (uint32_t col = 0u; col < w; ++col) {
         uint32_t best_piv = col, best_cost = UINT32_MAX;
@@ -512,13 +512,13 @@ static inline void qk_linf2_inplace(
         if (!qcc_bv_get(A[best_piv].w, col)) continue;
         if (best_piv != col) {
             qcc_bv256_t tmp = A[col]; A[col] = A[best_piv]; A[best_piv] = tmp;
-            if (nops >= cap) { cap *= 2u; ops = (step_t *)realloc(ops, cap * sizeof(step_t)); }
+            if (nops >= cap) { cap *= 2u; ops = (step_t *)qcc_xrealloc(ops, cap * sizeof(step_t)); }
             ops[nops++] = (step_t){1u, (uint16_t)col, (uint16_t)best_piv};
         }
         for (uint32_t r = 0u; r < w; ++r) {
             if (r != col && qcc_bv_get(A[r].w, col)) {
                 for (uint32_t ww = 0u; ww < QIR_WORDS; ++ww) A[r].w[ww] ^= A[col].w[ww];
-                if (nops >= cap) { cap *= 2u; ops = (step_t *)realloc(ops, cap * sizeof(step_t)); }
+                if (nops >= cap) { cap *= 2u; ops = (step_t *)qcc_xrealloc(ops, cap * sizeof(step_t)); }
                 ops[nops++] = (step_t){0u, (uint16_t)r, (uint16_t)col};
             }
         }
@@ -773,7 +773,7 @@ static inline bool qk_hmr_parity_lut_uncompute(
         if (cost->scratch_bits_needed < n_tgt + 1u) cost->scratch_bits_needed = n_tgt + 1u;
     }
 
-    uint32_t *hmr_bits = (uint32_t *)malloc((size_t)n_tgt * sizeof(uint32_t));
+    uint32_t *hmr_bits = n_tgt ? (uint32_t *)qcc_xmalloc((size_t)n_tgt * sizeof(uint32_t)) : NULL;
     uint32_t base_b = next_cbit ? *next_cbit : 0u;
     for (uint32_t j = 0u; j < n_tgt; ++j) {
         hmr_bits[j] = base_b + j;

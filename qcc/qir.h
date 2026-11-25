@@ -329,7 +329,7 @@ static inline qir_op_t *qir__new_op(
     op->pred_val = UINT32_MAX;
     op->num_ins  = num_ins;
     if (num_ins > 0u) {
-        op->ins = (uint32_t *)qcc_arena_alloc(m->arena, (size_t)num_ins * sizeof(uint32_t), 8u);
+        op->ins = (uint32_t *)qcc_arena_xalloc(m->arena, (size_t)num_ins * sizeof(uint32_t), 8u);
         memcpy(op->ins, ins, (size_t)num_ins * sizeof(uint32_t));
     }
     return op;
@@ -395,7 +395,7 @@ static inline uint32_t qir_emit_linf2(
     qir_op_t *op = qir__new_op(m, QIR_OP_LINF2, ins, num_ins, 0u);
     op->u.linf2.out_bits = out_bits;
     op->u.linf2.in_bits  = in_bits;
-    op->u.linf2.rows     = (qcc_bv256_t *)qcc_arena_alloc_zero(m->arena, (size_t)out_bits * sizeof(qcc_bv256_t), 8u);
+    op->u.linf2.rows     = out_bits ? (qcc_bv256_t *)qcc_arena_xalloc_zero(m->arena, (size_t)out_bits * sizeof(qcc_bv256_t), 8u) : NULL;
     if (rows && out_bits > 0u) memcpy(op->u.linf2.rows, rows, (size_t)out_bits * sizeof(qcc_bv256_t));
     if (const_vec) op->u.linf2.const_vec = *const_vec;
     uint32_t vid = qir__new_val(m, out_bits, QIR_REP_STD, op->id, name);
@@ -537,7 +537,7 @@ static inline uint32_t qir_emit_lut_rom(
     op->u.lut.val_words   = val_words;
     op->u.lut.num_entries = num_entries;
     size_t n_words = (size_t)num_entries * (size_t)val_words;
-    op->u.lut.table = (uint64_t *)qcc_arena_alloc_zero(m->arena, n_words * sizeof(uint64_t), 8u);
+    op->u.lut.table = n_words ? (uint64_t *)qcc_arena_xalloc_zero(m->arena, n_words * sizeof(uint64_t), 8u) : NULL;
     if (table && n_words > 0u) memcpy(op->u.lut.table, table, n_words * sizeof(uint64_t));
     uint32_t vid = qir__new_val(m, val_bits, QIR_REP_STD, op->id, name);
     op->outs[0]  = vid;
@@ -587,7 +587,7 @@ static inline uint32_t qir_emit_phase_poly(
     op->u.phase_poly.num_terms     = num_terms;
     op->u.phase_poly.total_in_bits = total_bits;
     op->u.phase_poly.terms = num_terms
-        ? (qir_phase_term_t *)qcc_arena_alloc(m->arena, (size_t)num_terms * sizeof(qir_phase_term_t), 16u)
+        ? (qir_phase_term_t *)qcc_arena_xalloc(m->arena, (size_t)num_terms * sizeof(qir_phase_term_t), 16u)
         : NULL;
     if (terms && num_terms > 0u) memcpy(op->u.phase_poly.terms, terms, (size_t)num_terms * sizeof(qir_phase_term_t));
     uint32_t vid = qir__new_val(m, 0u, QIR_REP_STD, op->id, name);
@@ -610,9 +610,9 @@ static inline uint32_t qir_emit_opaque_kmb(
     op->u.opaque.num_q    = cloned->num_qubits;
     op->u.opaque.in_bits  = in_bits;
     op->u.opaque.out_bits = out_bits;
-    op->u.opaque.in_q_idx = in_bits ? (uint32_t *)qcc_arena_alloc(m->arena, (size_t)in_bits * sizeof(uint32_t), 4u) : NULL;
+    op->u.opaque.in_q_idx = in_bits ? (uint32_t *)qcc_arena_xalloc(m->arena, (size_t)in_bits * sizeof(uint32_t), 4u) : NULL;
     if (in_bits && in_q_idx) memcpy(op->u.opaque.in_q_idx, in_q_idx, (size_t)in_bits * sizeof(uint32_t));
-    op->u.opaque.out_q_idx = out_bits ? (uint32_t *)qcc_arena_alloc(m->arena, (size_t)out_bits * sizeof(uint32_t), 4u) : NULL;
+    op->u.opaque.out_q_idx = out_bits ? (uint32_t *)qcc_arena_xalloc(m->arena, (size_t)out_bits * sizeof(uint32_t), 4u) : NULL;
     if (out_bits && out_q_idx) memcpy(op->u.opaque.out_q_idx, out_q_idx, (size_t)out_bits * sizeof(uint32_t));
 
     uint32_t vid = qir__new_val(m, out_bits, QIR_REP_STD, op->id, name);
@@ -1867,6 +1867,10 @@ static inline bool qir_eval_64(
                 uint64_t *qstate = nq ? (uint64_t *)calloc(nq, sizeof(uint64_t)) : NULL;
                 uint64_t *bstate = nb ? (uint64_t *)calloc(nb, sizeof(uint64_t)) : NULL;
                 uint64_t *cond_stack = (uint64_t *)calloc(64u, sizeof(uint64_t));
+                if ((nq && !qstate) || (nb && !bstate) || !cond_stack) {
+                    free(qstate); free(bstate); free(cond_stack);
+                    return false;
+                }
                 size_t cond_len = 0u, cond_cap = 64u;
                 /* Flatten IR inputs into mapped qubits */
                 uint32_t pos = 0u;
@@ -1892,7 +1896,12 @@ static inline bool qir_eval_64(
                     if (v.op == QCC_OP_PUSH_CONDITION) {
                         if (cond_len >= cond_cap) {
                             cond_cap *= 2u;
-                            cond_stack = (uint64_t *)realloc(cond_stack, cond_cap * sizeof(uint64_t));
+                            uint64_t *nc = (uint64_t *)realloc(cond_stack, cond_cap * sizeof(uint64_t));
+                            if (!nc) {
+                                free(qstate); free(bstate); free(cond_stack);
+                                return false;
+                            }
+                            cond_stack = nc;
                         }
                         cond_stack[cond_len++] = bstate[v.cond];
                         cond_all &= bstate[v.cond];

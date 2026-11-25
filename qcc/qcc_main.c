@@ -375,14 +375,14 @@ static int cmd_verify(int argc, char **argv) {
         qir_phys_plan_t dummy_plan;
         memset(&dummy_plan, 0, sizeof(dummy_plan));
         dummy_plan.mod = &ref_mod;
-        dummy_plan.val_allocs = (qir_val_alloc_t *)calloc(ref_mod.num_vals, sizeof(qir_val_alloc_t));
+        dummy_plan.val_allocs = ref_mod.num_vals ? (qir_val_alloc_t *)qcc_xcalloc(ref_mod.num_vals, sizeof(qir_val_alloc_t)) : NULL;
         uint8_t reg_used[256] = {0};
         uint32_t qoff = 0u;
         for (uint32_t i = 0u; i < ref_mod.num_inputs; ++i) {
             uint32_t vid = ref_mod.inputs[i];
             uint16_t w = ref_mod.vals[vid].width;
             dummy_plan.val_allocs[vid].width  = w;
-            dummy_plan.val_allocs[vid].qubits = w ? (uint32_t *)qcc_arena_alloc(&arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
+            dummy_plan.val_allocs[vid].qubits = w ? (uint32_t *)qcc_arena_xalloc(&arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
             const char *vname = ref_mod.vals[vid].name;
             int32_t hit = -1;
             for (uint32_t r = 0u; r < cand.num_regs && r < 256u; ++r) {
@@ -422,7 +422,7 @@ static int cmd_verify(int argc, char **argv) {
             if (hit >= 0) {
                 reg_used[hit] = 1u;
                 dummy_plan.val_allocs[vid].width  = w;
-                dummy_plan.val_allocs[vid].qubits = w ? (uint32_t *)qcc_arena_alloc(&arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
+                dummy_plan.val_allocs[vid].qubits = w ? (uint32_t *)qcc_arena_xalloc(&arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
                 for (uint16_t b = 0u; b < w && b < cand.regs[hit].len; ++b) {
                     dummy_plan.val_allocs[vid].qubits[b] = cand.regs[hit].targets[b] & UINT32_C(0x7FFFFFFF);
                 }
@@ -446,7 +446,7 @@ static int cmd_verify(int argc, char **argv) {
             if (hit >= 0) {
                 reg_used[hit] = 1u;
                 dummy_plan.val_allocs[vid].cwidth = w;
-                dummy_plan.val_allocs[vid].cbits  = w ? (uint32_t *)qcc_arena_alloc(&arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
+                dummy_plan.val_allocs[vid].cbits  = w ? (uint32_t *)qcc_arena_xalloc(&arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
                 for (uint16_t b = 0u; b < w && b < cand.regs[hit].len; ++b) {
                     dummy_plan.val_allocs[vid].cbits[b] = cand.regs[hit].targets[b] & UINT32_C(0x7FFFFFFF);
                 }
@@ -961,10 +961,10 @@ static int cmd_selftest(void) {
             /* Also cross-check opt_k directly against original 320Q circuit k */
             uint32_t k_nq = 320u;
             uint32_t opt_nq = opt_k.num_qubits ? opt_k.num_qubits : 320u;
-            uint64_t *init_orig = (uint64_t *)calloc(k_nq, sizeof(uint64_t));
-            uint64_t *init_opt  = (uint64_t *)calloc(opt_nq, sizeof(uint64_t));
-            uint64_t *out_orig  = (uint64_t *)calloc(k_nq, sizeof(uint64_t));
-            uint64_t *out_opt   = (uint64_t *)calloc(opt_nq, sizeof(uint64_t));
+            uint64_t *init_orig = (uint64_t *)qcc_xcalloc(k_nq, sizeof(uint64_t));
+            uint64_t *init_opt  = (uint64_t *)qcc_xcalloc(opt_nq, sizeof(uint64_t));
+            uint64_t *out_orig  = (uint64_t *)qcc_xcalloc(k_nq, sizeof(uint64_t));
+            uint64_t *out_opt   = (uint64_t *)qcc_xcalloc(opt_nq, sizeof(uint64_t));
             uint64_t rng = UINT64_C(0x320320AABBCCDD);
             uint64_t cross_err = 0u;
             flow_u128 goff = 0u;
@@ -1077,7 +1077,7 @@ static int cmd_selftest(void) {
         bool v_ok = test_compile_and_verify("T15_Declarative_ApproxFn_2Jet", &m, &ar, &cfg, 256u, false, false, true, 8u, &st);
 
         /* Numerically verify QIR approx_fn outputs against exact 1/sqrt(x) and 1/x for all x=1..255 */
-        qir_val_vec64_t *in_v = (qir_val_vec64_t *)calloc(1u, sizeof(qir_val_vec64_t));
+        qir_val_vec64_t *in_v = (qir_val_vec64_t *)qcc_xcalloc(1u, sizeof(qir_val_vec64_t));
         qcc_arena_t ev_ar; qcc_arena_init(&ev_ar, 512u * 1024u);
         uint64_t max_y_err = 0u, max_r_err = 0u;
         for (uint32_t base = 0u; base < 256u; base += 64u) {
@@ -1231,8 +1231,8 @@ static int cmd_selftest(void) {
                 fails++;
             } else {
                 uint32_t k_nq = kmb.num_qubits ? kmb.num_qubits : 1u;
-                uint64_t *init_q = (uint64_t *)calloc(k_nq, sizeof(uint64_t));
-                uint64_t *out_q  = (uint64_t *)calloc(k_nq, sizeof(uint64_t));
+                uint64_t *init_q = (uint64_t *)qcc_xcalloc(k_nq, sizeof(uint64_t));
+                uint64_t *out_q  = (uint64_t *)qcc_xcalloc(k_nq, sizeof(uint64_t));
                 flow_u128 ph[64];
                 for (uint32_t l = 0u; l < 64u; ++l) {
                     uint32_t xv = 1u + l * 61u;

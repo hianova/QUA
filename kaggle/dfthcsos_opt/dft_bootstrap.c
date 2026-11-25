@@ -54,6 +54,18 @@ static double wall_sec(void) {
     return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
 }
 
+static inline void *xmalloc_dft(size_t n) {
+    void *p = malloc(n ? n : 1u);
+    if (!p) abort();
+    return p;
+}
+
+static inline void *xcalloc_dft(size_t cnt, size_t sz) {
+    void *p = calloc(cnt ? cnt : 1u, sz ? sz : 1u);
+    if (!p) abort();
+    return p;
+}
+
 typedef struct {
     int      N;
     int      K;
@@ -205,8 +217,8 @@ static double exact_err2_from_uw(const dft_ref_t *ref, const double *U, const do
                                  int B, int C) {
     int     M     = R * B;
     int     RC    = R * C;
-    double *P_all = (double *)malloc((size_t)M * DFT_K * sizeof(double));
-    double *X_all = (double *)malloc((size_t)RC * DFT_K * sizeof(double));
+    double *P_all = (double *)xmalloc_dft((size_t)M * DFT_K * sizeof(double));
+    double *X_all = (double *)xmalloc_dft((size_t)RC * DFT_K * sizeof(double));
     for (int m = 0; m < M; ++m) {
         double u_tmp[DFT_N];
         memcpy(u_tmp, U + (size_t)m * DFT_N, DFT_N * sizeof(double));
@@ -219,8 +231,8 @@ static double exact_err2_from_uw(const dft_ref_t *ref, const double *U, const do
                     X_all + (size_t)r * C * DFT_K, DFT_K);
     }
     /* Exact ||X^T X - T_packed||_F^2 = ||G_XX||_F^2 - 2 Tr(X T_packed X^T) + ||T_packed||_F^2 */
-    double *G_XX = (double *)malloc((size_t)RC * RC * sizeof(double));
-    double *TX   = (double *)malloc((size_t)RC * DFT_K * sizeof(double));
+    double *G_XX = (double *)xmalloc_dft((size_t)RC * RC * sizeof(double));
+    double *TX   = (double *)xmalloc_dft((size_t)RC * DFT_K * sizeof(double));
     cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans, RC, RC, DFT_K, 1.0, X_all, DFT_K, X_all,
                 DFT_K, 0.0, G_XX, RC);
     cblas_dsymm(CblasRowMajor, CblasRight, CblasUpper, RC, DFT_K, 1.0, ref->T_packed, DFT_K, X_all,
@@ -279,15 +291,15 @@ static double flow_2jet_line_contract(double f0, double dphi0_scaled, double f1)
 
 static double run_lbfgs_flow2jet(int n_dim, double *x, int max_iter, int m_hist, lbfgs_fg_fn fg,
                                  void *ctx, const char *tag, int log_every) {
-    double *g      = (double *)malloc((size_t)n_dim * sizeof(double));
-    double *g_prev = (double *)malloc((size_t)n_dim * sizeof(double));
-    double *x_prev = (double *)malloc((size_t)n_dim * sizeof(double));
-    double *x_try  = (double *)malloc((size_t)n_dim * sizeof(double));
-    double *g_try  = (double *)malloc((size_t)n_dim * sizeof(double));
-    double *d      = (double *)malloc((size_t)n_dim * sizeof(double));
-    double *q      = (double *)malloc((size_t)n_dim * sizeof(double));
-    double *S_hist = (double *)malloc((size_t)m_hist * (size_t)n_dim * sizeof(double));
-    double *Y_hist = (double *)malloc((size_t)m_hist * (size_t)n_dim * sizeof(double));
+    double *g      = (double *)xmalloc_dft((size_t)n_dim * sizeof(double));
+    double *g_prev = (double *)xmalloc_dft((size_t)n_dim * sizeof(double));
+    double *x_prev = (double *)xmalloc_dft((size_t)n_dim * sizeof(double));
+    double *x_try  = (double *)xmalloc_dft((size_t)n_dim * sizeof(double));
+    double *g_try  = (double *)xmalloc_dft((size_t)n_dim * sizeof(double));
+    double *d      = (double *)xmalloc_dft((size_t)n_dim * sizeof(double));
+    double *q      = (double *)xmalloc_dft((size_t)n_dim * sizeof(double));
+    double *S_hist = (double *)xmalloc_dft((size_t)m_hist * (size_t)n_dim * sizeof(double));
+    double *Y_hist = (double *)xmalloc_dft((size_t)m_hist * (size_t)n_dim * sizeof(double));
     double  rho[64], alpha_h[64];
 
     double t0 = wall_sec();
@@ -363,7 +375,7 @@ static double run_lbfgs_flow2jet(int n_dim, double *x, int max_iter, int m_hist,
                 double *x_ext   = q; /* reuse scratch buffer q */
                 memcpy(x_ext, x, (size_t)n_dim * sizeof(double));
                 cblas_daxpy(n_dim, step_ext, d, 1, x_ext, 1);
-                double *g_ext = (double *)malloc((size_t)n_dim * sizeof(double));
+                double *g_ext = (double *)xmalloc_dft((size_t)n_dim * sizeof(double));
                 double  f_ext = fg(x_ext, g_ext, ctx);
                 if (f_ext < f_try) {
                     memcpy(x_try, x_ext, (size_t)n_dim * sizeof(double));
@@ -602,17 +614,17 @@ static void run_continuous_lbfgs_stage(const dft_ref_t *ref, int R, int B, int C
         .C          = C,
         .w_scale    = ws,
         .l1_reg     = l1_reg,
-        .Un_buf     = (double *)malloc((size_t)M * DFT_N * sizeof(double)),
-        .norms_buf  = (double *)malloc((size_t)M * sizeof(double)),
-        .P_buf      = (double *)malloc((size_t)M * DFT_K * sizeof(double)),
-        .X_buf      = (double *)malloc((size_t)RC * DFT_K * sizeof(double)),
-        .G_XX_buf   = (double *)malloc((size_t)RC * RC * sizeof(double)),
-        .XY_buf     = (double *)malloc((size_t)RC * ref->K_pos * sizeof(double)),
-        .grad_X_buf = (double *)malloc((size_t)RC * DFT_K * sizeof(double)),
-        .grad_P_buf = (double *)malloc((size_t)M * DFT_K * sizeof(double)),
+        .Un_buf     = (double *)xmalloc_dft((size_t)M * DFT_N * sizeof(double)),
+        .norms_buf  = (double *)xmalloc_dft((size_t)M * sizeof(double)),
+        .P_buf      = (double *)xmalloc_dft((size_t)M * DFT_K * sizeof(double)),
+        .X_buf      = (double *)xmalloc_dft((size_t)RC * DFT_K * sizeof(double)),
+        .G_XX_buf   = (double *)xmalloc_dft((size_t)RC * RC * sizeof(double)),
+        .XY_buf     = (double *)xmalloc_dft((size_t)RC * ref->K_pos * sizeof(double)),
+        .grad_X_buf = (double *)xmalloc_dft((size_t)RC * DFT_K * sizeof(double)),
+        .grad_P_buf = (double *)xmalloc_dft((size_t)M * DFT_K * sizeof(double)),
     };
 
-    double *x = (double *)malloc((size_t)ndim * sizeof(double));
+    double *x = (double *)xmalloc_dft((size_t)ndim * sizeof(double));
     for (int m = 0; m < M; ++m) {
         memcpy(x + (size_t)m * DFT_N, U + (size_t)m * DFT_N, DFT_N * sizeof(double));
         normalize_u_vec(x + (size_t)m * DFT_N);
@@ -650,7 +662,7 @@ static void solve_block_w_qr_eigen(const double *P_r, const double *Res, int B, 
     dft_lapack_int lwork = -1;
     dgeqrf_(&m, &n, Q_col_buf, &lda, tau, &qwork, &lwork, &info);
     lwork        = (dft_lapack_int)qwork + 64;
-    double *work = (double *)malloc((size_t)lwork * sizeof(double));
+    double *work = (double *)xmalloc_dft((size_t)lwork * sizeof(double));
     dgeqrf_(&m, &n, Q_col_buf, &lda, tau, work, &lwork, &info);
 
     double R_col[128 * 128];
@@ -672,7 +684,7 @@ static void solve_block_w_qr_eigen(const double *P_r, const double *Res, int B, 
     double         ev[128];
     dft_lapack_int nb   = B;
     dft_lapack_int lw_e = 256 * B;
-    double        *wk_e = (double *)malloc((size_t)lw_e * sizeof(double));
+    double        *wk_e = (double *)xmalloc_dft((size_t)lw_e * sizeof(double));
     char           jobz = 'V', uplo = 'U';
     dsyev_(&jobz, &uplo, &nb, SB, &nb, ev, wk_e, &lw_e, &info);
 
@@ -691,7 +703,7 @@ static void solve_block_w_qr_eigen(const double *P_r, const double *Res, int B, 
     double         U_svd[128 * 128], Vt_svd[128 * 128], s_svd[128];
     char           jobu = 'A', jobvt = 'A';
     dft_lapack_int lw_s = 256 * B;
-    double        *wk_s = (double *)malloc((size_t)lw_s * sizeof(double));
+    double        *wk_s = (double *)xmalloc_dft((size_t)lw_s * sizeof(double));
     dgesvd_(&jobu, &jobvt, &nb, &nb, R_col, &nb, s_svd, U_svd, &nb, Vt_svd, &nb, wk_s, &lw_s,
             &info);
 
@@ -722,11 +734,11 @@ static void solve_block_w_qr_eigen(const double *P_r, const double *Res, int B, 
 static void polish_w_exact_varpro(const dft_ref_t *ref, int R, int B, int C, int n_sweeps,
                                   double sv_floor, const double *U, double *w) {
     size_t  kk  = (size_t)DFT_K * (size_t)DFT_K;
-    double *Res = (double *)malloc(kk * sizeof(double));
-    double *P_a = (double *)malloc((size_t)R * B * DFT_K * sizeof(double));
-    double *X_a = (double *)malloc((size_t)R * C * DFT_K * sizeof(double));
-    double *HQ  = (double *)malloc((size_t)B * DFT_K * sizeof(double));
-    double *Qb  = (double *)malloc((size_t)B * DFT_K * sizeof(double));
+    double *Res = (double *)xmalloc_dft(kk * sizeof(double));
+    double *P_a = (double *)xmalloc_dft((size_t)R * B * DFT_K * sizeof(double));
+    double *X_a = (double *)xmalloc_dft((size_t)R * C * DFT_K * sizeof(double));
+    double *HQ  = (double *)xmalloc_dft((size_t)B * DFT_K * sizeof(double));
+    double *Qb  = (double *)xmalloc_dft((size_t)B * DFT_K * sizeof(double));
 
     memcpy(Res, ref->T_packed, kk * sizeof(double));
     for (int r = 0; r < R; ++r) {
@@ -759,7 +771,7 @@ static void polish_w_exact_varpro(const dft_ref_t *ref, int R, int B, int C, int
 
 static void prune_and_fit_block_to_X(const double *U_in, int B_in, int B_out, int C,
                                      const double *X_target, double *U_out, double *w_out) {
-    double *P_in = (double *)malloc((size_t)B_in * DFT_K * sizeof(double));
+    double *P_in = (double *)xmalloc_dft((size_t)B_in * DFT_K * sizeof(double));
     for (int b = 0; b < B_in; ++b) {
         double u_tmp[DFT_N];
         memcpy(u_tmp, U_in + (size_t)b * DFT_N, DFT_N * sizeof(double));
@@ -846,15 +858,15 @@ static void compress_blocks_4tensor(const double *U_src, const double *w_src, in
     if (B_max > 76) B_max = 76;
     int C_cur = (C_dst < C_src) ? C_dst : C_src;
 
-    double *U_list = (double *)malloc((size_t)cur_R * B_max * DFT_N * sizeof(double));
-    double *X_list = (double *)malloc((size_t)cur_R * C_cur * DFT_K * sizeof(double));
-    int    *B_cnt  = (int *)malloc((size_t)cur_R * sizeof(int));
-    double *P_tmp  = (double *)malloc((size_t)(2 * B_max) * DFT_K * sizeof(double));
+    double *U_list = (double *)xmalloc_dft((size_t)cur_R * B_max * DFT_N * sizeof(double));
+    double *X_list = (double *)xmalloc_dft((size_t)cur_R * C_cur * DFT_K * sizeof(double));
+    int    *B_cnt  = (int *)xmalloc_dft((size_t)cur_R * sizeof(int));
+    double *P_tmp  = (double *)xmalloc_dft((size_t)(2 * B_max) * DFT_K * sizeof(double));
 
     for (int r = 0; r < cur_R; ++r) {
         const double *Ur   = U_src + (size_t)r * B_src * DFT_N;
         const double *wr   = w_src + (size_t)r * B_src * C_src;
-        double       *Xr_s = (double *)malloc((size_t)C_src * DFT_K * sizeof(double));
+        double       *Xr_s = (double *)xmalloc_dft((size_t)C_src * DFT_K * sizeof(double));
         compute_block_X(Ur, wr, B_src, C_src, P_tmp, Xr_s);
 
         if (C_cur < C_src) {
@@ -911,7 +923,7 @@ static void compress_blocks_4tensor(const double *U_src, const double *w_src, in
 
         int     bi = ord[0], bj = ord[1];
         double  best_loss4 = 1e300;
-        double *X_cat      = (double *)malloc(128 * DFT_K * sizeof(double));
+        double *X_cat      = (double *)xmalloc_dft(128 * DFT_K * sizeof(double));
         double  G2[128 * 128], ev2[128], wk2[4096];
 
         for (int a = 0; a < pool; ++a) {
@@ -1142,8 +1154,8 @@ static void synthesize_givens_tree_searu(const double *U, const double *w, int R
     int     mod     = 1 << brot;
     int     half    = 1 << (brot - 1);
     double  scale   = (double)half;
-    double *cos_lut = (double *)malloc((size_t)mod * sizeof(double));
-    double *sin_lut = (double *)malloc((size_t)mod * sizeof(double));
+    double *cos_lut = (double *)xmalloc_dft((size_t)mod * sizeof(double));
+    double *sin_lut = (double *)xmalloc_dft((size_t)mod * sizeof(double));
     for (int k = 0; k < mod; ++k) {
         double th  = kPi * (double)k / scale;
         cos_lut[k] = cos(th);
@@ -1259,7 +1271,7 @@ static double fg_qat_alpha_w(const double *x, double *g, void *vctx) {
 
     const int chunk      = 64;
     const int n_chunks   = (M + chunk - 1) / chunk;
-    double   *chunk_pen  = (double *)calloc((size_t)n_chunks, sizeof(double));
+    double   *chunk_pen  = (double *)xcalloc_dft((size_t)n_chunks, sizeof(double));
 
     /* 1. Multi-threaded forward Givens tree + grid-well penalty + MSB0 box barrier */
     dispatch_apply((size_t)n_chunks, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
@@ -1394,7 +1406,7 @@ static void run_qat_angle_lbfgs_c17(const dft_ref_t *ref, int R, int B, int C, i
     const double scale = (double)(1 << (brot - 1));
     const double hi_m0 = (scale - 1.0) / scale;
 
-    double *x = (double *)malloc((size_t)ndim * sizeof(double));
+    double *x = (double *)xmalloc_dft((size_t)ndim * sizeof(double));
     for (int m = 0; m < M; ++m) {
         double *am = x + (size_t)m * DFT_E;
         encode_u_on_tree_msb0(U + (size_t)m * DFT_N, edges, am);
@@ -1418,16 +1430,16 @@ static void run_qat_angle_lbfgs_c17(const dft_ref_t *ref, int R, int B, int C, i
         .w_scale        = ws,
         .gamma_grid     = 0.0,
         .msb_bar_weight = 2.0,
-        .U_buf          = (double *)malloc((size_t)M * DFT_N * sizeof(double)),
-        .P_buf          = (double *)malloc((size_t)M * DFT_K * sizeof(double)),
-        .vp_buf         = (double *)malloc((size_t)M * DFT_E * sizeof(double)),
-        .gg_buf         = (double *)malloc((size_t)M * DFT_E * sizeof(double)),
-        .X_buf          = (double *)malloc((size_t)RC * DFT_K * sizeof(double)),
-        .G_XX_buf       = (double *)malloc((size_t)RC * RC * sizeof(double)),
-        .XY_buf         = (double *)malloc((size_t)RC * ref->K_pos * sizeof(double)),
-        .grad_X         = (double *)malloc((size_t)RC * DFT_K * sizeof(double)),
-        .grad_P         = (double *)malloc((size_t)M * DFT_K * sizeof(double)),
-        .wn2_fixed      = (double *)malloc((size_t)M * sizeof(double)),
+        .U_buf          = (double *)xmalloc_dft((size_t)M * DFT_N * sizeof(double)),
+        .P_buf          = (double *)xmalloc_dft((size_t)M * DFT_K * sizeof(double)),
+        .vp_buf         = (double *)xmalloc_dft((size_t)M * DFT_E * sizeof(double)),
+        .gg_buf         = (double *)xmalloc_dft((size_t)M * DFT_E * sizeof(double)),
+        .X_buf          = (double *)xmalloc_dft((size_t)RC * DFT_K * sizeof(double)),
+        .G_XX_buf       = (double *)xmalloc_dft((size_t)RC * RC * sizeof(double)),
+        .XY_buf         = (double *)xmalloc_dft((size_t)RC * ref->K_pos * sizeof(double)),
+        .grad_X         = (double *)xmalloc_dft((size_t)RC * DFT_K * sizeof(double)),
+        .grad_P         = (double *)xmalloc_dft((size_t)M * DFT_K * sizeof(double)),
+        .wn2_fixed      = (double *)xmalloc_dft((size_t)M * sizeof(double)),
     };
 
     const double gammas[6] = {0.0, 2e-5, 1e-4, 5e-4, 2.5e-3, 1.0e-2};
@@ -1705,14 +1717,14 @@ static void run_searu_4tensor_crucible(const dft_ref_t *ref, int R, int B, int C
     const double scale = (double)half;
 
     size_t  kk  = (size_t)DFT_K * (size_t)DFT_K;
-    double *Res = (double *)malloc(kk * sizeof(double));
-    double *X_a = (double *)malloc((size_t)R * C * DFT_K * sizeof(double));
-    double *P_a = (double *)malloc((size_t)M * DFT_K * sizeof(double));
-    double *Q_b = (double *)malloc((size_t)B * DFT_K * sizeof(double));
-    double *HQ  = (double *)malloc((size_t)B * DFT_K * sizeof(double));
+    double *Res = (double *)xmalloc_dft(kk * sizeof(double));
+    double *X_a = (double *)xmalloc_dft((size_t)R * C * DFT_K * sizeof(double));
+    double *P_a = (double *)xmalloc_dft((size_t)M * DFT_K * sizeof(double));
+    double *Q_b = (double *)xmalloc_dft((size_t)B * DFT_K * sizeof(double));
+    double *HQ  = (double *)xmalloc_dft((size_t)B * DFT_K * sizeof(double));
 
-    double *cos_lut = (double *)malloc((size_t)mod * sizeof(double));
-    double *sin_lut = (double *)malloc((size_t)mod * sizeof(double));
+    double *cos_lut = (double *)xmalloc_dft((size_t)mod * sizeof(double));
+    double *sin_lut = (double *)xmalloc_dft((size_t)mod * sizeof(double));
     for (int k = 0; k < mod; ++k) {
         double th  = kPi * (double)k / scale;
         cos_lut[k] = cos(th);
@@ -1768,8 +1780,8 @@ static void run_searu_4tensor_crucible(const dft_ref_t *ref, int R, int B, int C
     const int radii[6]       = {10, 6, 4, 3, 3, 3};
     const int searu_iters[6] = {32, 48, 64, 64, 80, 80};
     uint64_t  rng            = UINT64_C(0x5EA20DF7C5050002);
-    int      *rb_ord         = (int *)malloc((size_t)M * sizeof(int));
-    double   *wnorm          = (double *)malloc((size_t)M * sizeof(double));
+    int      *rb_ord         = (int *)xmalloc_dft((size_t)M * sizeof(int));
+    double   *wnorm          = (double *)xmalloc_dft((size_t)M * sizeof(double));
     double    v_pack[DFT_K], q_vec[DFT_K], R4_q[DFT_K], h_pack[DFT_K];
     double    u_new[DFT_N], p_new[DFT_K], dp[DFT_K], R4_dp[DFT_K];
 
@@ -1981,8 +1993,8 @@ int main(int argc, char **argv) {
         }
 
         if (nxt_R != cur_R || nxt_B != cur_B || nxt_C != cur_C) {
-            double *nxt_U = (double *)malloc((size_t)nxt_R * nxt_B * DFT_N * sizeof(double));
-            double *nxt_w = (double *)malloc((size_t)nxt_R * nxt_B * nxt_C * sizeof(double));
+            double *nxt_U = (double *)xmalloc_dft((size_t)nxt_R * nxt_B * DFT_N * sizeof(double));
+            double *nxt_w = (double *)xmalloc_dft((size_t)nxt_R * nxt_B * nxt_C * sizeof(double));
             compress_blocks_4tensor(cur_U, cur_w, cur_R, cur_B, cur_C, nxt_R, nxt_B, nxt_C, nxt_U,
                                     nxt_w);
             free(cur_U);
@@ -2037,11 +2049,11 @@ int main(int argc, char **argv) {
     compute_msb0_mask(edges, msb0_mask);
 
     /* Pass 2.5: Multi-Threaded Angle-Space QAT Homotopy L-BFGS */
-    double *alpha_qat = (double *)malloc((size_t)R * B * DFT_E * sizeof(double));
+    double *alpha_qat = (double *)xmalloc_dft((size_t)R * B * DFT_E * sizeof(double));
     run_qat_angle_lbfgs_c17(&ref, R, B, C, brot, edges, msb0_mask, U, w, alpha_qat);
 
     /* Pass 3: Live-Residual 4-Tensor SEARU Sparse-k Lattice Crucible */
-    int64_t *words_2b = (int64_t *)malloc((size_t)R * B * DFT_E * sizeof(int64_t));
+    int64_t *words_2b = (int64_t *)xmalloc_dft((size_t)R * B * DFT_E * sizeof(int64_t));
     run_searu_4tensor_crucible(&ref, R, B, C, brot, edges, msb0_mask, alpha_qat, U, w, words_2b);
 
     FILE *fo = fopen(out_path, "wb");

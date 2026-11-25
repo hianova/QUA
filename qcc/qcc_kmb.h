@@ -353,7 +353,7 @@ static inline uint32_t qcc_kmb_add_quantum_reg(
     if (sl > 63u) sl = 63u;
     if (sl) memcpy(r->name, name, sl);
     r->name_len = (uint32_t)sl;
-    r->targets  = n ? (uint32_t *)malloc((size_t)n * sizeof(uint32_t)) : NULL;
+    r->targets  = n ? (uint32_t *)qcc_xmalloc((size_t)n * sizeof(uint32_t)) : NULL;
     r->len      = n;
     r->cap      = n;
     for (uint32_t i = 0u; i < n; ++i) {
@@ -379,7 +379,7 @@ static inline uint32_t qcc_kmb_add_classical_reg(
     if (sl > 63u) sl = 63u;
     if (sl) memcpy(r->name, name, sl);
     r->name_len = (uint32_t)sl;
-    r->targets  = n ? (uint32_t *)malloc((size_t)n * sizeof(uint32_t)) : NULL;
+    r->targets  = n ? (uint32_t *)qcc_xmalloc((size_t)n * sizeof(uint32_t)) : NULL;
     r->len      = n;
     r->cap      = n;
     for (uint32_t i = 0u; i < n; ++i) {

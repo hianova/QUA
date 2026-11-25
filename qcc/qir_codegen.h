@@ -147,9 +147,9 @@ static inline void qk_clz_norm(
 ) {
     if (iw == 0u) return;
     /* anc layout: work[iw], cond_anc[iw], raw_clz[clz_w], is_zero_flag[1], tmp[1] */
-    uint32_t *work = (uint32_t *)malloc((size_t)iw * sizeof(uint32_t));
-    uint32_t *cand = (uint32_t *)malloc((size_t)iw * sizeof(uint32_t));
-    uint32_t *rclz = (uint32_t *)malloc((size_t)(clz_w ? clz_w : 1u) * sizeof(uint32_t));
+    uint32_t *work = (uint32_t *)qcc_xmalloc((size_t)iw * sizeof(uint32_t));
+    uint32_t *cand = (uint32_t *)qcc_xmalloc((size_t)iw * sizeof(uint32_t));
+    uint32_t *rclz = (uint32_t *)qcc_xmalloc((size_t)(clz_w ? clz_w : 1u) * sizeof(uint32_t));
     for (uint16_t i = 0u; i < iw; ++i) {
         work[i] = qk__q(anc, i);
         cand[i] = qk__q(anc, iw + i);
@@ -365,8 +365,8 @@ static inline bool qir_codegen_or_count(
                     } else {
                         /* Invert LINF2 matrix over F_2 to restore in-place if needed */
                         uint32_t w = lf->out_bits;
-                        qcc_bv256_t *M = (qcc_bv256_t *)malloc((size_t)(w ? w : 1u) * sizeof(qcc_bv256_t));
-                        qcc_bv256_t *I = (qcc_bv256_t *)calloc(w ? w : 1u, sizeof(qcc_bv256_t));
+                        qcc_bv256_t *M = (qcc_bv256_t *)qcc_xmalloc((size_t)(w ? w : 1u) * sizeof(qcc_bv256_t));
+                        qcc_bv256_t *I = (qcc_bv256_t *)qcc_xcalloc(w ? w : 1u, sizeof(qcc_bv256_t));
                         memcpy(M, lf->rows, (size_t)w * sizeof(qcc_bv256_t));
                         for (uint32_t r = 0u; r < w; ++r) qcc_bv_set(I[r].w, r);
                         for (uint32_t col = 0u; col < w; ++col) {
@@ -394,7 +394,7 @@ static inline bool qir_codegen_or_count(
                         free(I);
                     }
                 } else {
-                    uint32_t *flat_in = (uint32_t *)malloc((size_t)(lf->in_bits ? lf->in_bits : 1u) * sizeof(uint32_t));
+                    uint32_t *flat_in = (uint32_t *)qcc_xmalloc((size_t)(lf->in_bits ? lf->in_bits : 1u) * sizeof(uint32_t));
                     uint32_t p = 0u;
                     for (uint16_t i = 0u; i < src_op->num_ins; ++i) {
                         uint32_t vid = src_op->ins[i];
@@ -696,7 +696,7 @@ static inline bool qir_codegen_or_count(
                             qk_linf2_inplace(kb_or_null, &kc, vq, dm, lf->rows, NULL);
                         } else {
                             uint32_t cinv = qir__gf2m_inv_u32(celem, (uint16_t)dm, op->u.gf2m.irred_poly);
-                            qcc_bv256_t *inv_rows = (qcc_bv256_t *)calloc(dm ? dm : 1u, sizeof(qcc_bv256_t));
+                            qcc_bv256_t *inv_rows = (qcc_bv256_t *)qcc_xcalloc(dm ? dm : 1u, sizeof(qcc_bv256_t));
                             for (uint32_t c = 0u; c < dm; ++c) {
                                 uint32_t col = qir__gf2m_mul_u32(cinv, UINT32_C(1) << c, (uint16_t)dm, op->u.gf2m.irred_poly);
                                 for (uint32_t r = 0u; r < dm; ++r) {
@@ -771,7 +771,7 @@ static inline bool qir_codegen_or_count(
                     /* Direct LUT for small field (e.g. deg <= 8) */
                     uint16_t deg = op->u.gf2m.m;
                     uint32_t nent = UINT32_C(1) << deg;
-                    uint64_t *tbl = (uint64_t *)calloc(nent, sizeof(uint64_t));
+                    uint64_t *tbl = (uint64_t *)qcc_xcalloc(nent, sizeof(uint64_t));
                     for (uint32_t a = 0u; a < nent; ++a) tbl[a] = qir__gf2m_inv_u32(a, deg, op->u.gf2m.irred_poly);
                     if (ctrl_q == UINT32_MAX) {
                         qk_lut_rom_qrom(kb_or_null, &kc, tbl, nent, 1u, 0u, deg, in0_q, deg, out_q, st->temp_anc, &cbit);
@@ -1034,7 +1034,7 @@ static inline bool qir_codegen_or_count(
                 const qcc_kmb_circuit_t *sk = op->u.opaque.kmb;
                 if (!sk) break;
                 uint32_t sub_nq = op->u.opaque.num_q ? op->u.opaque.num_q : sk->num_qubits;
-                uint32_t *qmap = (uint32_t *)malloc((size_t)(sub_nq ? sub_nq : 1u) * sizeof(uint32_t));
+                uint32_t *qmap = (uint32_t *)qcc_xmalloc((size_t)(sub_nq ? sub_nq : 1u) * sizeof(uint32_t));
                 for (uint32_t q = 0u; q < sub_nq; ++q) qmap[q] = q;
                 if (st->inplace_on_in0) {
                     uint32_t pos = 0u;
@@ -1211,7 +1211,7 @@ static inline bool qir_codegen_emit(const qir_phys_plan_t *plan, qcc_kmb_circuit
     }
 
     if (plan->emit_clean_reg && plan->clean_scratch_certified && actual.num_qubits > 0u) {
-        uint8_t *io_q = (uint8_t *)calloc(actual.num_qubits, 1u);
+        uint8_t *io_q = (uint8_t *)qcc_xcalloc(actual.num_qubits, 1u);
         for (uint32_t r = 0u; r < out_kmb->num_regs; ++r) {
             const qcc_kmb_reg_t *reg = &out_kmb->regs[r];
             for (uint32_t k = 0u; k < reg->len; ++k) {
@@ -1221,7 +1221,7 @@ static inline bool qir_codegen_emit(const qir_phys_plan_t *plan, qcc_kmb_circuit
                 }
             }
         }
-        uint32_t *clean_qs = (uint32_t *)malloc(actual.num_qubits * sizeof(uint32_t));
+        uint32_t *clean_qs = (uint32_t *)qcc_xmalloc(actual.num_qubits * sizeof(uint32_t));
         uint32_t n_clean = 0u;
         for (uint32_t q = 0u; q < actual.num_qubits; ++q) {
             if (!io_q[q]) clean_qs[n_clean++] = q;

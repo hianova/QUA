@@ -190,7 +190,7 @@ static inline bool qir_pass_kmb_optimize_with_plan(
     uint32_t old_nq = max_q_seen ? max_q_seen : 1u;
 
     /* Pass A1: Parity-Tracked Z/Z_POW Fusion across linear Clifford/X/CX/SWAP networks */
-    qir__kmb_parity_t *basis = (qir__kmb_parity_t *)calloc(old_nq, sizeof(qir__kmb_parity_t));
+    qir__kmb_parity_t *basis = (qir__kmb_parity_t *)qcc_xcalloc(old_nq, sizeof(qir__kmb_parity_t));
     qir__kmb_zslot_t   zslots[256];
     memset(zslots, 0, sizeof(zslots));
     uint32_t next_gen = 1u;
@@ -333,8 +333,8 @@ static inline bool qir_pass_kmb_optimize_with_plan(
     }
 
     /* Pass B: O(n) Per-Qubit Horizon Self-Inverse Cancellation */
-    size_t *last_q = (size_t *)malloc((size_t)old_nq * sizeof(size_t));
-    size_t (*prev_q)[3] = (size_t (*)[3])malloc(n * sizeof(*prev_q));
+    size_t *last_q = (size_t *)qcc_xmalloc((size_t)old_nq * sizeof(size_t));
+    size_t (*prev_q)[3] = (size_t (*)[3])qcc_xmalloc(n * sizeof(*prev_q));
     for (uint32_t q = 0u; q < old_nq; ++q) last_q[q] = SIZE_MAX;
     for (size_t i = 0u; i < n; ++i) prev_q[i][0] = prev_q[i][1] = prev_q[i][2] = SIZE_MAX;
 
@@ -371,8 +371,8 @@ static inline bool qir_pass_kmb_optimize_with_plan(
     free(prev_q);
 
     /* Pass C: Physical Qubit Hole Compaction (syncing c->regs and plan_or_null) */
-    uint8_t  *q_used  = (uint8_t *)calloc(old_nq, 1u);
-    uint32_t *q_remap = (uint32_t *)calloc(old_nq, sizeof(uint32_t));
+    uint8_t  *q_used  = (uint8_t *)qcc_xcalloc(old_nq, 1u);
+    uint32_t *q_remap = (uint32_t *)qcc_xcalloc(old_nq, sizeof(uint32_t));
     for (uint32_t r = 0u; r < c->num_regs; ++r) {
         const qcc_kmb_reg_t *reg = &c->regs[r];
         if (strcmp(reg->name, "@clean") == 0) continue;
@@ -422,7 +422,7 @@ static inline bool qir_pass_kmb_optimize_with_plan(
         const qcc_kmb_reg_t *reg = &c->regs[r];
         bool is_q = (reg->len > 0u) && ((reg->targets[0] & UINT32_C(0x80000000)) != 0u);
         if (is_q && strcmp(reg->name, "@clean") == 0) {
-            uint32_t *ids = reg->len ? (uint32_t *)malloc(reg->len * sizeof(uint32_t)) : NULL;
+            uint32_t *ids = reg->len ? (uint32_t *)qcc_xmalloc(reg->len * sizeof(uint32_t)) : NULL;
             uint32_t kept = 0u;
             for (uint32_t k = 0u; k < reg->len; ++k) {
                 uint32_t tid = reg->targets[k] & UINT32_C(0x7FFFFFFF);
@@ -432,7 +432,7 @@ static inline bool qir_pass_kmb_optimize_with_plan(
             free(ids);
             continue;
         }
-        uint32_t *ids = reg->len ? (uint32_t *)malloc(reg->len * sizeof(uint32_t)) : NULL;
+        uint32_t *ids = reg->len ? (uint32_t *)qcc_xmalloc(reg->len * sizeof(uint32_t)) : NULL;
         for (uint32_t k = 0u; k < reg->len; ++k) {
             uint32_t tid = reg->targets[k] & UINT32_C(0x7FFFFFFF);
             ids[k] = (is_q && tid < old_nq) ? q_remap[tid] : tid;

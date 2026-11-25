@@ -140,6 +140,36 @@ static inline void *qcc_arena_alloc_zero(qcc_arena_t *a, size_t bytes, size_t al
     return p;
 }
 
+static inline void *qcc_xmalloc(size_t n) {
+    void *p = malloc(n ? n : 1u);
+    if (!p) abort();
+    return p;
+}
+
+static inline void *qcc_xcalloc(size_t cnt, size_t sz) {
+    void *p = calloc(cnt ? cnt : 1u, sz ? sz : 1u);
+    if (!p) abort();
+    return p;
+}
+
+static inline void *qcc_xrealloc(void *ptr, size_t n) {
+    void *p = realloc(ptr, n ? n : 1u);
+    if (!p) abort();
+    return p;
+}
+
+static inline void *qcc_arena_xalloc(qcc_arena_t *a, size_t bytes, size_t align) {
+    void *p = qcc_arena_alloc(a, bytes, align);
+    if (!p) abort();
+    return p;
+}
+
+static inline void *qcc_arena_xalloc_zero(qcc_arena_t *a, size_t bytes, size_t align) {
+    void *p = qcc_arena_alloc_zero(a, bytes, align);
+    if (!p) abort();
+    return p;
+}
+
 static inline char *qcc_arena_strdup(qcc_arena_t *a, const char *s) {
     if (!s) return NULL;
     size_t n = strlen(s) + 1u;

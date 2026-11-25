@@ -469,8 +469,8 @@ static inline bool qir__can_exec_inplace(
     }
 
     /* Map every bit of src_v to its module input register (vid, bit) */
-    uint32_t *bit_in_vid = (uint32_t *)malloc((size_t)w * sizeof(uint32_t));
-    uint16_t *bit_in_pos = (uint16_t *)malloc((size_t)w * sizeof(uint16_t));
+    uint32_t *bit_in_vid = (uint32_t *)qcc_xmalloc((size_t)w * sizeof(uint32_t));
+    uint16_t *bit_in_pos = (uint16_t *)qcc_xmalloc((size_t)w * sizeof(uint16_t));
     for (uint16_t b = 0u; b < w; ++b) {
         bit_in_vid[b] = UINT32_MAX;
         for (uint32_t ii = 0u; ii < m->num_inputs; ++ii) {
@@ -505,7 +505,7 @@ static inline bool qir__can_exec_inplace(
         }
         if (!has_cons && dn && sn && strcmp(dn, sn) == 0) ok = true;
     } else if (!is_direct_out[dst]) {
-        uint8_t *cov = (uint8_t *)calloc(w, 1u);
+        uint8_t *cov = (uint8_t *)qcc_xcalloc(w, 1u);
         ok = true;
         for (uint32_t ci = op->id + 1u; ci < m->num_ops && ok; ++ci) {
             if (op_skip[ci]) continue;
@@ -625,8 +625,8 @@ static inline void qir__alloc_step_temp(
         }
     }
 
-    st->temp_anc = (uint32_t *)qcc_arena_alloc(arena, (size_t)need_temp * sizeof(uint32_t), 4u);
-    uint8_t *borrowed = (uint8_t *)calloc(need_temp, 1u);
+    st->temp_anc = (uint32_t *)qcc_arena_xalloc(arena, (size_t)need_temp * sizeof(uint32_t), 4u);
+    uint8_t *borrowed = (uint8_t *)qcc_xcalloc(need_temp, 1u);
     uint32_t filled = 0u;
     if (can_borrow_zero) {
         uint32_t vid0 = op->outs[0];
@@ -689,8 +689,8 @@ static inline bool qir_regalloc_pack(
     size_t no = m->num_ops ? m->num_ops : 1u;
     bool eff_clean = force_clean || m->require_clean_scratch;
 
-    out_plan->chosen_enodes = (uint32_t *)malloc(nv * sizeof(uint32_t));
-    out_plan->val_allocs    = (qir_val_alloc_t *)calloc(nv, sizeof(qir_val_alloc_t));
+    out_plan->chosen_enodes = (uint32_t *)qcc_xmalloc(nv * sizeof(uint32_t));
+    out_plan->val_allocs    = (qir_val_alloc_t *)qcc_xcalloc(nv, sizeof(qir_val_alloc_t));
     if (m->num_vals > 0u) memcpy(out_plan->chosen_enodes, chosen_enodes_in, nv * sizeof(uint32_t));
 
     /* Pre-build cached GF plans when needed */
@@ -717,21 +717,21 @@ static inline bool qir_regalloc_pack(
         }
     }
 
-    uint8_t  *op_skip       = (uint8_t *)calloc(no, 1u);
-    uint8_t  *will_alias    = (uint8_t *)calloc(nv, 1u);
-    uint8_t  *is_direct_out = (uint8_t *)calloc(nv, 1u);
-    uint8_t  *is_in         = (uint8_t *)calloc(nv, 1u);
-    uint8_t  *is_pinned_out = (uint8_t *)calloc(nv, 1u);
-    uint8_t  *hmr_measured  = (uint8_t *)calloc(nv, 1u);
-    uint8_t  *can_uncomp    = (uint8_t *)calloc(no, 1u);
-    uint8_t  *computed      = (uint8_t *)calloc(no, 1u);
-    uint8_t  *uncomputed    = (uint8_t *)calloc(no, 1u);
-    uint32_t *fwd_refs      = (uint32_t *)calloc(nv, sizeof(uint32_t));
-    uint32_t *uncomp_pin    = (uint32_t *)calloc(nv, sizeof(uint32_t));
-    uint32_t *back_vals     = (uint32_t *)calloc(nv * 64u, sizeof(uint32_t));
-    uint16_t *back_cnt      = (uint16_t *)calloc(nv, sizeof(uint16_t));
-    uint32_t *step_back_ins = (uint32_t *)calloc(no * 64u, sizeof(uint32_t));
-    uint16_t *step_back_cnt = (uint16_t *)calloc(no, sizeof(uint16_t));
+    uint8_t  *op_skip       = (uint8_t *)qcc_xcalloc(no, 1u);
+    uint8_t  *will_alias    = (uint8_t *)qcc_xcalloc(nv, 1u);
+    uint8_t  *is_direct_out = (uint8_t *)qcc_xcalloc(nv, 1u);
+    uint8_t  *is_in         = (uint8_t *)qcc_xcalloc(nv, 1u);
+    uint8_t  *is_pinned_out = (uint8_t *)qcc_xcalloc(nv, 1u);
+    uint8_t  *hmr_measured  = (uint8_t *)qcc_xcalloc(nv, 1u);
+    uint8_t  *can_uncomp    = (uint8_t *)qcc_xcalloc(no, 1u);
+    uint8_t  *computed      = (uint8_t *)qcc_xcalloc(no, 1u);
+    uint8_t  *uncomputed    = (uint8_t *)qcc_xcalloc(no, 1u);
+    uint32_t *fwd_refs      = (uint32_t *)qcc_xcalloc(nv, sizeof(uint32_t));
+    uint32_t *uncomp_pin    = (uint32_t *)qcc_xcalloc(nv, sizeof(uint32_t));
+    uint32_t *back_vals     = (uint32_t *)qcc_xcalloc(nv * 64u, sizeof(uint32_t));
+    uint16_t *back_cnt      = (uint16_t *)qcc_xcalloc(nv, sizeof(uint16_t));
+    uint32_t *step_back_ins = (uint32_t *)qcc_xcalloc(no * 64u, sizeof(uint32_t));
+    uint16_t *step_back_cnt = (uint16_t *)qcc_xcalloc(no, sizeof(uint16_t));
 
     /* Enforce coupled rewrite invariants in reverse topological order so downstream folds take precedence */
     for (int32_t oi_s = (int32_t)m->num_ops - 1; oi_s >= 0; --oi_s) {
@@ -921,11 +921,11 @@ static inline bool qir_regalloc_pack(
         va->is_pinned_io = 1u;
         if (m->vals[vid].rep == QIR_REP_CLASSICAL) {
             va->cwidth = w;
-            va->cbits  = w ? (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
+            va->cbits  = w ? (uint32_t *)qcc_arena_xalloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
             for (uint16_t b = 0u; b < w; ++b) va->cbits[b] = cbit++;
         } else {
             va->width  = w;
-            va->qubits = w ? (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
+            va->qubits = w ? (uint32_t *)qcc_arena_xalloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
             for (uint16_t b = 0u; b < w; ++b) {
                 va->qubits[b] = qir__pool_alloc_clean(pool, &peak_q);
             }
@@ -933,9 +933,9 @@ static inline bool qir_regalloc_pack(
     }
 
     size_t max_steps = (size_t)m->num_ops * 2u + 16u;
-    out_plan->steps  = (qir_sched_step_t *)calloc(max_steps, sizeof(qir_sched_step_t));
-    uint32_t *ready_heap = (uint32_t *)malloc(no * sizeof(uint32_t));
-    uint8_t  *in_ready   = (uint8_t *)calloc(no, 1u);
+    out_plan->steps  = (qir_sched_step_t *)qcc_xcalloc(max_steps, sizeof(qir_sched_step_t));
+    uint32_t *ready_heap = (uint32_t *)qcc_xmalloc(no * sizeof(uint32_t));
+    uint8_t  *in_ready   = (uint8_t *)qcc_xcalloc(no, 1u);
     uint32_t  rh_len     = 0u;
     uint32_t ns      = 0u;
     bool certified   = true;
@@ -956,12 +956,12 @@ static inline bool qir_regalloc_pack(
             if (m->vals[dst].rep == QIR_REP_CLASSICAL) {
                 if (!sva->cbits) continue;
                 dva->cwidth = w;
-                dva->cbits  = w ? (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
+                dva->cbits  = w ? (uint32_t *)qcc_arena_xalloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
                 for (uint16_t b = 0u; b < w; ++b) dva->cbits[b] = sva->cbits[op->u.slice.lo + b];
             } else {
                 if (!sva->qubits) continue;
                 dva->width  = w;
-                dva->qubits = w ? (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
+                dva->qubits = w ? (uint32_t *)qcc_arena_xalloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
                 for (uint16_t b = 0u; b < w; ++b) dva->qubits[b] = sva->qubits[op->u.slice.lo + b];
             }
             continue;
@@ -973,7 +973,7 @@ static inline bool qir_regalloc_pack(
             dva->is_alias = 1u;
             if (m->vals[dst].rep == QIR_REP_CLASSICAL) {
                 dva->cwidth = w;
-                dva->cbits  = w ? (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
+                dva->cbits  = w ? (uint32_t *)qcc_arena_xalloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
                 uint16_t pos = 0u;
                 for (uint16_t i = 0u; i < op->num_ins; ++i) {
                     const qir_val_alloc_t *iva = &out_plan->val_allocs[op->ins[i]];
@@ -982,7 +982,7 @@ static inline bool qir_regalloc_pack(
                 }
             } else {
                 dva->width  = w;
-                dva->qubits = w ? (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
+                dva->qubits = w ? (uint32_t *)qcc_arena_xalloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
                 uint16_t pos = 0u;
                 for (uint16_t i = 0u; i < op->num_ins; ++i) {
                     const qir_val_alloc_t *iva = &out_plan->val_allocs[op->ins[i]];
@@ -1027,7 +1027,7 @@ static inline bool qir_regalloc_pack(
                     cand_idx = 0u; cand_v = src_op->ins[0];
                     uint16_t w = m->vals[op->outs[0]].width;
                     const qir_linf2_payload_t *lf = st.fused_linf2 ? st.fused_linf2 : &op->u.linf2;
-                    qcc_bv256_t *M = (qcc_bv256_t *)malloc((size_t)(w ? w : 1u) * sizeof(qcc_bv256_t));
+                    qcc_bv256_t *M = (qcc_bv256_t *)qcc_xmalloc((size_t)(w ? w : 1u) * sizeof(qcc_bv256_t));
                     memcpy(M, lf->rows, (size_t)w * sizeof(qcc_bv256_t));
                     bool inv_ok = true;
                     for (uint32_t col = 0u; col < w; ++col) {
@@ -1101,11 +1101,11 @@ static inline bool qir_regalloc_pack(
                 va->is_pinned_io = is_pinned_out[vid];
                 if (m->vals[vid].rep == QIR_REP_CLASSICAL) {
                     va->cwidth = w;
-                    va->cbits  = w ? (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
+                    va->cbits  = w ? (uint32_t *)qcc_arena_xalloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
                     for (uint16_t b = 0u; b < w; ++b) va->cbits[b] = cbit++;
                 } else {
                     va->width  = w;
-                    va->qubits = w ? (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
+                    va->qubits = w ? (uint32_t *)qcc_arena_xalloc(eg->arena, (size_t)w * sizeof(uint32_t), 4u) : NULL;
                     for (uint16_t b = 0u; b < w; ++b) va->qubits[b] = qir__pool_alloc_clean(pool, &peak_q);
                 }
             }
@@ -1117,7 +1117,7 @@ static inline bool qir_regalloc_pack(
         if (need_aux > 0u && op->num_outs > 0u && !st.inplace_on_in0) {
             qir_val_alloc_t *va0 = &out_plan->val_allocs[op->outs[0]];
             va0->aux_width  = (uint16_t)need_aux;
-            va0->aux_qubits = (uint32_t *)qcc_arena_alloc(eg->arena, (size_t)need_aux * sizeof(uint32_t), 4u);
+            va0->aux_qubits = (uint32_t *)qcc_arena_xalloc(eg->arena, (size_t)need_aux * sizeof(uint32_t), 4u);
             for (uint32_t a = 0u; a < need_aux; ++a) {
                 va0->aux_qubits[a] = qir__pool_alloc_clean(pool, &peak_q);
             }
@@ -1376,8 +1376,8 @@ static inline bool qir_optimize_module(
     size_t no = mod->num_ops ? mod->num_ops : 1u;
 
     /* Impact-ranked selection of multi-choice E-Classes mapped to 1..3 bits in SEARU's 256-bit canvas */
-    uint32_t *all_multi   = (uint32_t *)malloc(nc * sizeof(uint32_t));
-    uint64_t *multi_score = (uint64_t *)malloc(nc * sizeof(uint64_t));
+    uint32_t *all_multi   = (uint32_t *)qcc_xmalloc(nc * sizeof(uint32_t));
+    uint64_t *multi_score = (uint64_t *)qcc_xmalloc(nc * sizeof(uint64_t));
     uint32_t n_all_multi  = 0u;
     for (uint32_t c = 0u; c < eg->num_classes; ++c) {
         if (eg->classes[c].num_enodes <= 1u) continue;
@@ -1424,8 +1424,8 @@ static inline bool qir_optimize_module(
     free(multi_score);
 
     /* Rank uncompute-capable ops by output width & cost so SEARU targets high-value uncomputation first */
-    uint32_t *all_uncomp = (uint32_t *)malloc(no * sizeof(uint32_t));
-    uint64_t *uncomp_sc  = (uint64_t *)malloc(no * sizeof(uint64_t));
+    uint32_t *all_uncomp = (uint32_t *)qcc_xmalloc(no * sizeof(uint32_t));
+    uint64_t *uncomp_sc  = (uint64_t *)qcc_xmalloc(no * sizeof(uint64_t));
     uint32_t n_all_unc   = 0u;
     for (uint32_t oi = 0u; oi < mod->num_ops; ++oi) {
         const qir_op_t *op = &mod->ops[oi];
@@ -1454,8 +1454,8 @@ static inline bool qir_optimize_module(
     free(uncomp_sc);
 
     /* Backward reachability from PHASE_POLY / PHASE_DOT so phase-feeding approx ops remain bit-exact */
-    uint8_t *feeds_phase_val = (uint8_t *)calloc(eg->num_classes ? eg->num_classes : 1u, 1u);
-    uint8_t *feeds_phase_op  = (uint8_t *)calloc(no, 1u);
+    uint8_t *feeds_phase_val = (uint8_t *)qcc_xcalloc(eg->num_classes ? eg->num_classes : 1u, 1u);
+    uint8_t *feeds_phase_op  = (uint8_t *)qcc_xcalloc(no, 1u);
     for (uint32_t oi = 0u; oi < mod->num_ops; ++oi) {
         const qir_op_t *op = &mod->ops[oi];
         if (op->kind == QIR_OP_PHASE_POLY || op->kind == QIR_OP_PHASE_DOT) {
@@ -1476,9 +1476,9 @@ static inline bool qir_optimize_module(
         }
     }
 
-    uint16_t *approx_widths = (uint16_t *)calloc(no, sizeof(uint16_t));
-    uint8_t  *uncomp_flags  = (uint8_t *)malloc(no);
-    uint32_t *base_choices  = (uint32_t *)calloc(nc, sizeof(uint32_t));
+    uint16_t *approx_widths = (uint16_t *)qcc_xcalloc(no, sizeof(uint16_t));
+    uint8_t  *uncomp_flags  = (uint8_t *)qcc_xmalloc(no);
+    uint32_t *base_choices  = (uint32_t *)qcc_xcalloc(nc, sizeof(uint32_t));
     for (uint32_t oi = 0u; oi < mod->num_ops; ++oi) {
         const qir_op_t *op = &mod->ops[oi];
         uint16_t out_w = (op->num_outs > 0u) ? mod->vals[op->outs[0]].width : 0u;
@@ -1704,8 +1704,8 @@ static inline bool qir_optimize_module(
 
     searu_hyperparams hp = SEARU_ACTIVE_OPT_HP;
     searu_result sres;
-    uint32_t *cand_choices = (uint32_t *)malloc(nc * sizeof(uint32_t));
-    uint8_t  *cand_uncomp  = (uint8_t *)malloc(no);
+    uint32_t *cand_choices = (uint32_t *)qcc_xmalloc(nc * sizeof(uint32_t));
+    uint8_t  *cand_uncomp  = (uint8_t *)qcc_xmalloc(no);
 
     SEARU_SOLVE_INLINE_HP(
         &sres, num_vars, init_c, pin_c, cfg.seed,

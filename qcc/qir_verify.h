@@ -64,7 +64,12 @@ static inline bool qir_sim_kmb_64_ex(
         if (v.op == QCC_OP_PUSH_CONDITION) {
             if (cond_len >= cond_cap) {
                 cond_cap *= 2u;
-                cond_stack = (uint64_t *)realloc(cond_stack, cond_cap * sizeof(uint64_t));
+                uint64_t *nc = (uint64_t *)realloc(cond_stack, cond_cap * sizeof(uint64_t));
+                if (!nc) {
+                    free(qstate); free(bstate); free(cond_stack);
+                    return false;
+                }
+                cond_stack = nc;
             }
             cond_stack[cond_len++] = bstate[v.cond];
             cond_all &= bstate[v.cond];
@@ -203,6 +208,13 @@ static inline bool qir_verify_kmb_vs_qir(
     uint64_t *out_b2 = (uint64_t *)calloc(k_nb, sizeof(uint64_t));
     uint8_t  *is_io_q = (uint8_t *)calloc(k_nq, 1u);
     qir_val_vec64_t *in_vecs = mod->num_inputs ? (qir_val_vec64_t *)calloc(mod->num_inputs, sizeof(qir_val_vec64_t)) : NULL;
+    if (!init_q || !init_b || !out_q1 || !out_q2 || !out_b1 || !out_b2 || !is_io_q ||
+        (mod->num_inputs && !in_vecs)) {
+        free(init_q); free(init_b); free(out_q1); free(out_q2);
+        free(out_b1); free(out_b2); free(is_io_q); free(in_vecs);
+        qcc_arena_free(&scratch);
+        return false;
+    }
 
     for (uint32_t ii = 0u; ii < mod->num_inputs; ++ii) {
         uint32_t vid = mod->inputs[ii];
@@ -395,6 +407,10 @@ static inline bool qir_verify_kmb_vs_kmb_mask(
     uint64_t *qc1 = (uint64_t *)calloc(nq, sizeof(uint64_t));
     uint64_t *qc2 = (uint64_t *)calloc(nq, sizeof(uint64_t));
     uint64_t *qr1 = (uint64_t *)calloc(nq, sizeof(uint64_t));
+    if (!init_q || !qc1 || !qc2 || !qr1) {
+        free(init_q); free(qc1); free(qc2); free(qr1);
+        return false;
+    }
 
     uint64_t rng = seed ? seed : UINT64_C(0x13579BDF2468ACE0);
     flow_u128 global_off = 0u;

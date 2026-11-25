@@ -95,7 +95,7 @@ static inline uint32_t pqc_emit_linf2_from_fn(
     memset(cur_out, 0, sizeof(cur_out));
     fn(in_b, base_out, ctx);
 
-    qcc_bv256_t *rows = (qcc_bv256_t *)calloc(out_bits ? out_bits : 1u, sizeof(qcc_bv256_t));
+    qcc_bv256_t *rows = (qcc_bv256_t *)qcc_xcalloc(out_bits ? out_bits : 1u, sizeof(qcc_bv256_t));
     qcc_bv256_t cvec = qcc_bv_zero();
     for (uint16_t r = 0u; r < out_bits; ++r) {
         if (pqc__get_bit(base_out, r)) qcc_bv_set(cvec.w, r);
@@ -429,7 +429,7 @@ static inline void pqc_ref_sha256_bytes(const uint8_t *msg, size_t len, uint8_t 
     uint32_t h[8];
     memcpy(h, PQC_SHA256_IV, sizeof(h));
     size_t padded_len = ((len + 9u + 63u) / 64u) * 64u;
-    uint8_t *buf = (uint8_t *)calloc(padded_len, 1u);
+    uint8_t *buf = (uint8_t *)qcc_xcalloc(padded_len, 1u);
     if (len > 0u) memcpy(buf, msg, len);
     buf[len] = 0x80u;
     uint64_t bit_len = (uint64_t)len * 8u;

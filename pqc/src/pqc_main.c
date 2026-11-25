@@ -218,6 +218,14 @@ static bool pqc_compile_and_verify(
         uint64_t *out_b1 = (uint64_t *)calloc(k_nb, sizeof(uint64_t));
         uint64_t *out_b2 = (uint64_t *)calloc(k_nb, sizeof(uint64_t));
         uint8_t  *io_q   = (uint8_t *)calloc(k_nq, 1u);
+        if (!init_q || !out_q1 || !out_q2 || !init_b || !out_b1 || !out_b2 || !io_q) {
+            free(init_q); free(out_q1); free(out_q2);
+            free(init_b); free(out_b1); free(out_b2); free(io_q);
+            qcc_kmb_free(&kmb);
+            qir_phys_plan_free(&plan);
+            qir_egraph_free(&eg);
+            return false;
+        }
 
         for (uint16_t b = 0u; b < in_w; ++b) io_q[plan.val_allocs[in_vid].qubits[b]] = 1u;
         for (uint32_t oi = 0u; oi < mod->num_outputs; ++oi) {

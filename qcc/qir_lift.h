@@ -218,7 +218,7 @@ static inline bool qir_lift_from_kmb(
             }
             if (k_act == 0u) { pos = end; continue; }
 
-            qcc_bv256_t *rows = (qcc_bv256_t *)qcc_arena_alloc_zero(arena, (size_t)k_act * sizeof(qcc_bv256_t), 8u);
+            qcc_bv256_t *rows = (qcc_bv256_t *)qcc_arena_xalloc_zero(arena, (size_t)k_act * sizeof(qcc_bv256_t), 8u);
             qcc_bv256_t cvec = qcc_bv_zero();
             for (uint32_t i = 0u; i < k_act; ++i) qcc_bv_set(rows[i].w, i);
 
@@ -272,8 +272,9 @@ static inline bool qir_lift_from_kmb(
                 end++;
             }
             size_t nterms = end - pos;
-            qir_phase_term_t *terms = (qir_phase_term_t *)qcc_arena_alloc_zero(
-                arena, nterms * sizeof(qir_phase_term_t), 16u);
+            qir_phase_term_t *terms = nterms
+                ? (qir_phase_term_t *)qcc_arena_xalloc_zero(arena, nterms * sizeof(qir_phase_term_t), 16u)
+                : NULL;
             for (size_t p = pos; p < end; ++p) {
                 qir_phase_term_t *pt = &terms[p - pos];
                 const qcc_kmb_op_view_t *v = &views[p];
@@ -338,7 +339,7 @@ static inline bool qir_lift_from_kmb(
         qcc_kmb_init(&sub);
         sub.num_qubits = k_act;
         uint32_t max_src_b = ks.num_bits > k->num_bits ? ks.num_bits : k->num_bits;
-        uint32_t *b_map = max_src_b ? (uint32_t *)malloc((size_t)max_src_b * sizeof(uint32_t)) : NULL;
+        uint32_t *b_map = max_src_b ? (uint32_t *)qcc_xmalloc((size_t)max_src_b * sizeof(uint32_t)) : NULL;
         if (b_map) {
             for (uint32_t bi = 0u; bi < max_src_b; ++bi) b_map[bi] = UINT32_MAX;
         }
