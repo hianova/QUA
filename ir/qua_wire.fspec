@@ -1,0 +1,27 @@
+# FLOW v10.0.0 ArenaSchema: 64-byte QUA Ring-0 Config & Syndrome Wire Cells
+arena 4 qua_wire build/qua_wire.h qua_wire_cell_t qua_wire_map_t qua_wire_arena_t
+
+layout qctrl_cfg_wire qctrl_cfg_wire_t
+  field huber_bound_q16 0 i64 1
+  field inv_lrv_q16 64 i64 1
+  field lrv_q16 128 i64 1
+  field log_thresh_q16 192 i64 1
+  field z_soft_q16 256 i64 1
+  field z_curv_min_q16 320 i64 1
+  field dt_max_q16 384 i64 1
+  field flags_u64 448 u64 1
+
+layout qctrl_synd_wire qctrl_synd_wire_t
+  field base_rate_q16 0 i64 1
+  field ewma_rate_q16 64 i64 1
+  field cusum_q16 128 i64 1
+  field thresh_q16 192 i64 1
+  field rounds 256 u32 1
+  field triggers 288 u32 1
+  field synd_x 320 u32 1
+  field synd_z 352 u32 1
+  field corr_mask 384 u64 1
+  field seq_u64 448 u64 1
+
+region cfg 0 2 qctrl_cfg_wire QUA_SLOT_CFG -
+region synd 2 2 qctrl_synd_wire QUA_SLOT_SYND -
