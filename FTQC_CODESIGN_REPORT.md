@@ -1,6 +1,6 @@
 # QUA Full-Stack FTQC Co-Design Report (`qctrl Ring-0` × `qcc` × `Magic State Cultivation`)
 
-- **Profile Source**: `../qctrl/build/qctrl_ftqc_profile.json` (live measured qctrl bench40, Ring-0 40q sweep = `11938 ns`)
+- **Profile Source**: `../qctrl/build/qctrl_ftqc_profile.json` (live measured qctrl bench40, Ring-0 40q sweep = `11901 ns`)
 - **Fixed-Point Engine**: Pure C17 integer `pqc_ftqc_cultivation.h` (zero `<math.h>`)
 
 ## 1. Verified Logical Benchmarks (`qcc` + `pqc` Compiled `.kmb` Artifacts)
@@ -21,11 +21,11 @@
 | Decoder Mode & Distance | Measured Ring-0 Decode Latency | `1,000 ns` Budget Headroom | Below-Threshold Suppression `Λ` |
 | :---: | :---: | :---: | :---: |
 | 2D `d = 3` (Code Cap) | **`2.14 ns / round`** | 467.3x faster | baseline |
-| 2D `d = 5` (Code Cap) | **`3.90 ns / round`** | 256.4x faster | **`Λ_2D(3→5) = 6.03x`** |
-| 2D `d = 7` (Code Cap) | **`7.26 ns / round`** | 137.7x faster | **`Λ_2D(5→7) = 5.80x`** |
-| 3D `d = 3` (`d` noisy rnds) | **`5.00 ns / round`** | 200.0x faster | baseline |
-| 3D `d = 5` (`d` noisy rnds) | **`11.86 ns / round`** | 84.3x faster | **`Λ_3D(3→5) = 4.00x`** |
-| 3D `d = 7` (`d` noisy rnds) | **`92.96 ns / round`** | 10.8x faster | **`Λ_3D(5→7) = 0.59x`** |
+| 2D `d = 5` (Code Cap) | **`3.98 ns / round`** | 251.3x faster | **`Λ_2D(3→5) = 6.03x`** |
+| 2D `d = 7` (Code Cap) | **`7.14 ns / round`** | 140.1x faster | **`Λ_2D(5→7) = 5.80x`** |
+| 3D `d = 3` (`d` noisy rnds) | **`3.93 ns / round`** | 254.5x faster | baseline |
+| 3D `d = 5` (`d` noisy rnds) | **`8.43 ns / round`** | 118.6x faster | **`Λ_3D(3→5) = 4.02x`** |
+| 3D `d = 7` (`d` noisy rnds) | **`33.98 ns / round`** | 29.4x faster | **`Λ_3D(5→7) = 5.71x`** |
 
 ## 3. Gen-1 Baseline Hardware (`F_2Q = 99.60%`, `T1 = 530 us`, `T2 = 300 us`)
 
@@ -105,4 +105,4 @@
 - **Calibration gates Cultivation**: `No-Cal` (`156 mrad` `ZZ`) leaves `p_eff = 2.24%` (Gen-1) / `1.99%` (Gen-2) above the `1.00%` surface-code threshold (`ABOVE_TH`), blocking fault-tolerant scaling.
 - **Ring-0 unlocks Cultivation where `T`-budget permits**: `FLOW-QCtrl Ring-0` (`32 mrad` `ZZ`) lowers Gen-2 `p_eff` to `0.43%`, unlocking Cultivation for **5/8** benchmarks (`QAOA_MaxCut12_Wallace` (`dc=5`, **3.38x**), `Ising4x4_Trotter` (`dc=5`, **4.55x**), `Plaquette4x4_LGT` (`dc=5`, **4.54x**), `KSAT12_Grover` (`dc=5`, **1.97x**), `GF256_SEARU_A32` (`dc=5`, **3.10x**)), while higher-budget workloads (`QAOA_MaxCut12_Base` (`553 T-eq`, `d=29`), `QAOA_MaxCut12_Opt` (`433 T-eq`, `d=29`), `AES128_10R_Fwd` (`43200 T-eq`, `d=35`)) stay on `15-to-1` distillation.
 - **3-Stage Compiler QAOA Trajectory (PopLUT -> Wallace 3:2 crosses Cultivation Cliff)**: `Base -> PopLUT -> Wallace 3:2` compresses `QAOA_MaxCut12` logical footprint `Q: 151 -> 79 -> 101` and `T-eq: 553 -> 433 -> 73`, cutting Gen-2 Ring-0 physical footprint **`307982 -> 186878 -> 92282`** qubits (Cultivation UNLOCKED!).
-- **Sub-microsecond Ring-0 2D & 3D decoding**: Pure-GPR MWPM latency spans `2.14–7.26 ns/rnd` (2D) and `5.00–92.96 ns/rnd` (3D noisy rounds, `d=3..7`), inside the `1,000 ns` cycle budget with `Λ_2D(5→7) = 5.80x` & `Λ_3D(5→7) = 0.59x`.
+- **Sub-microsecond Ring-0 2D & 3D decoding**: Pure-GPR MWPM latency spans `2.14–7.14 ns/rnd` (2D) and `3.93–33.98 ns/rnd` (3D noisy rounds, `d=3..7`), inside the `1,000 ns` cycle budget with `Λ_2D(5→7) = 5.80x` & `Λ_3D(5→7) = 5.71x`.

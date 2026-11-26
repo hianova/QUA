@@ -434,6 +434,41 @@ static int run_selftest(void) {
         printf("[SELF-CHECK PASS] Ring-0 3D Space-Time (d=3,5,7): %llu data+meas wt<=t patterns 0 errors\n",
                (unsigned long long)total_3d_cases);
     }
+
+    /* Exact Iterative Integer Edmonds' Blossom vs Exact Bitmask-DP Parity Verification (500 dense d=7 graphs) */
+    {
+        qctrl_sc_code_t c7;
+        qctrl_sc_init_ring0(&c7, 7U);
+        rng_t brng;
+        rng_seed(&brng, UINT64_C(0xB10550D7));
+        for (uint32_t tc = 0U; tc < 500U; ++tc) {
+            uint32_t g = tc & 1U;
+            uint32_t k = 4U + (uint32_t)(rng_next(&brng) % 5U); /* k in 4..8 (clustered in 3D) */
+            uint8_t cs[8], ct[8];
+            uint32_t s_par = 0U;
+            for (uint32_t i = 0U; i < k; ++i) {
+                /* Generate dense clusters with nearby spatial/temporal indices to trigger odd cycles */
+                uint8_t base_s = (uint8_t)(rng_next(&brng) % 12U);
+                cs[i]          = (uint8_t)(base_s + (uint8_t)(tc % 12U));
+                if (cs[i] >= c7.n_stab) {
+                    cs[i] = (uint8_t)(cs[i] % c7.n_stab);
+                }
+                ct[i] = (uint8_t)(rng_next(&brng) % 5U);
+                s_par ^= (UINT32_C(1) << cs[i]);
+            }
+            uint32_t dp_cost = 0U, blos_cost = 0U;
+            (void)qctrl__solve_comp_dp3d_ring0_ex(&c7, g, cs, ct, k, &dp_cost);
+            uint64_t blos_corr = qctrl__solve_comp_blossom3d_ring0(&c7, g, cs, ct, k, &blos_cost);
+            uint32_t out_synd  = qctrl_sc_syndrome_ring0(&c7, blos_corr, g != 0U);
+            if (blos_cost != dp_cost || out_synd != s_par) {
+                fprintf(stderr,
+                        "SELFTEST FAIL: Blossom vs DP tc=%u g=%u k=%u dp_cost=%u blos_cost=%u synd=%x exp=%x\n",
+                        tc, g, k, dp_cost, blos_cost, out_synd, s_par);
+                return 1;
+            }
+        }
+        printf("[SELF-CHECK PASS] Ring-0 3D Exact Blossom vs Bitmask-DP (d=7): 500/500 dense graphs 0 weight discrepancies\n");
+    }
     return 0;
 }
 
@@ -1052,12 +1087,14 @@ static int run_decode3d_bench(const char *prof_in, const char *prof_out, const c
     if (eps_l[2][ref_pi] <= 0.0) ref_pi = 3; /* p=0.010 */
     double lam35 = (eps_l[1][ref_pi] > 0.0) ? (eps_l[0][ref_pi] / eps_l[1][ref_pi]) : 1.0;
     double lam57 = (eps_l[2][ref_pi] > 0.0) ? (eps_l[1][ref_pi] / eps_l[2][ref_pi]) : 1.0;
+    double lam35_rnd = (eps_l[1][ref_pi] > 0.0) ? ((eps_l[0][ref_pi] / 3.0) / (eps_l[1][ref_pi] / 5.0)) : 1.0;
+    double lam57_rnd = (eps_l[2][ref_pi] > 0.0) ? ((eps_l[1][ref_pi] / 5.0) / (eps_l[2][ref_pi] / 7.0)) : 1.0;
 
     printf("\n=== Ring-0 Pure-GPR 3D Space-Time Decoder Benchmark (d rounds + ideal final, 20k blocks/pt) ===\n");
     printf("Latency @ p_d=p_m=0.003: d=3 %.1f ns/blk (%.1f ns/rnd) | d=5 %.1f ns/blk (%.1f ns/rnd) | d=7 %.1f ns/blk (%.1f ns/rnd)\n",
            lat_ns_block[0], lat_ns_round[0], lat_ns_block[1], lat_ns_round[1], lat_ns_block[2], lat_ns_round[2]);
-    printf("3D Suppression @ p=%.3f: Lambda_3D(3->5) = %.2fx | Lambda_3D(5->7) = %.2fx\n",
-           kPs[ref_pi], lam35, lam57);
+    printf("3D Suppression @ p=%.3f: Block Lambda_3D(3->5) = %.2fx (rnd %.2fx) | Block Lambda_3D(5->7) = %.2fx (rnd %.2fx)\n",
+           kPs[ref_pi], lam35, lam35_rnd, lam57, lam57_rnd);
     printf("   p_d=p_m | eps_L (d=3) | eps_L (d=5) | eps_L (d=7)\n");
     for (int pi = 0; pi < 5; ++pi) {
         printf("    %.3f  |  %.3e  |  %.3e  |  %.3e\n",
@@ -1128,8 +1165,8 @@ static int run_decode3d_bench(const char *prof_in, const char *prof_out, const c
             fprintf(rp, "  - **`d = 3`（4 切片）**：**`%.1f ns / block`（`%.1f ns / round`）**\n", lat_ns_block[0], lat_ns_round[0]);
             fprintf(rp, "  - **`d = 5`（6 切片）**：**`%.1f ns / block`（`%.1f ns / round`）**\n", lat_ns_block[1], lat_ns_round[1]);
             fprintf(rp, "  - **`d = 7`（8 切片）**：**`%.1f ns / block`（`%.1f ns / round`）**\n", lat_ns_block[2], lat_ns_round[2]);
-            fprintf(rp, "- **3D 指數抑錯因子 (`p_d = p_m = %.3f`)**：`Λ_3D(d=3→5) = %.2f×`、`Λ_3D(d=5→7) = %.2f×`\n\n",
-                    kPs[ref_pi], lam35, lam57);
+            fprintf(rp, "- **3D 指數抑錯因子 (`p_d = p_m = %.3f`)**：整塊 `Λ_3D(d=3→5) = %.2f×`（單輪 `%.2f×`）、整塊 `Λ_3D(d=5→7) = %.2f×`（單輪 `%.2f×`）\n\n",
+                    kPs[ref_pi], lam35, lam35_rnd, lam57, lam57_rnd);
             fprintf(rp, "| 時空誤差 `p_data = p_meas` | `d = 3` 3D 邏輯錯誤率 | `d = 5` 3D 邏輯錯誤率 | `d = 7` 3D 邏輯錯誤率 |\n");
             fprintf(rp, "| :---: | :---: | :---: | :---: |\n");
             for (int pi = 0; pi < 5; ++pi) {
@@ -1148,7 +1185,7 @@ static int run_decode3d_bench(const char *prof_in, const char *prof_out, const c
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr,
-                "Usage: %s selftest | bench40 [--out path.json] | breakeven --in bench40.json --report DEMO.md [--ftqc-out profile.json] | decode-bench [--profile-in p.json] [--profile-out p.json] [--report DEMO.md]\n",
+                "Usage: %s selftest | bench40 [--out path.json] | breakeven --in bench40.json --report DEMO.md [--ftqc-out profile.json] | decode-bench [--profile-in p.json] [--profile-out p.json] [--report DEMO.md] | decode3d-bench [--profile-in p.json] [--profile-out p.json] [--report DEMO.md]\n",
                 argv[0]);
         return 1;
     }

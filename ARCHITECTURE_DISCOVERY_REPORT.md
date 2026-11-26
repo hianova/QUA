@@ -37,20 +37,22 @@
 
 ### 3. Pure-GPR Ring-0 即時 2D / 3D 表面碼解碼（無需 GPU / AI 推論延遲）
 - **2D Code-Capacity 精確解碼（[`qctrl/qctrl_decoder_ring0.h`](qctrl/qctrl_decoder_ring0.h)）**：純整數 freestanding Pure-GPR（`0` 浮點/SIMD、`0` `udiv`/`sdiv`、`0` heap、`0` 間接跳躍）實作 `d = 3, 5, 7` 精確 Bitmask-DP MWPM：
-  - 最新基準平均解碼延遲：**`2.14 ns/rnd`（`d=3`） / `3.90 ns/rnd`（`d=5`） / `7.26 ns/rnd`（`d=7`）**，比 `1,000 ns` 表面碼週期硬性時限快 **137×–467×**。
+  - 最新基準平均解碼延遲：**`2.14 ns/rnd`（`d=3`） / `3.98 ns/rnd`（`d=5`） / `7.14 ns/rnd`（`d=7`）**，比 `1,000 ns` 表面碼週期硬性時限快 **140×–467×**。
   - 窮舉 `39,966` 組 `wt <= (d-1)/2` Pauli 錯誤達成 **`0` 邏輯誤判**；`p = 0.010` 下測得指數抑錯 **`Λ_2D(3→5) = 6.03×`** 與 **`Λ_2D(5→7) = 5.80×`**；並內建 EWMA+CUSUM 症候漂移監控器（200 回靜默 `0` 誤報、TLS 突發 19 回觸發）。
-- **Stage B 新增突破 — 3D 時空容錯解碼（[`qctrl/qctrl_decoder3d_ring0.h`](qctrl/qctrl_decoder3d_ring0.h)）**：同以 Pure-GPR 實作 Safe-Component BFS（`d3d < bdist(i)+bdist(j)`）＋ Bitmask-DP（`k <= 10`）＋ Savings Greedy ＋ 2-Opt，於 `d` 輪含資料與量測雜訊的時空圖即時解碼：
-  - 驗證 `40,510` 組 `data+meas` 混合故障（`d=3, 5` 全窮舉 `wt <= t` ＋ `5,000` 組 `d=7` `wt=3` 三元組）達成 **`0` 邏輯誤判**。
-  - 3D 單輪平均延遲：**`5.00 ns/rnd`（`15.0 ns/blk`，`d=3`） / `11.86 ns/rnd`（`59.3 ns/blk`，`d=5`） / `92.96 ns/rnd`（`650.7 ns/blk`，`d=7`）**，高階 `d=7` 仍比 `1,000 ns` 硬性時限快 **`10.8×`**。
-  - **誠實縮放極限觀測**：`p_data = p_meas = 0.002` 時 `d=3/5/7` 失效率為 `1.300e-03 / 1.500e-04 / 0.000e+00`；`p = 0.006` 下測得 **`Λ_3D(3→5) = 4.00×`**（`8.000e-03 -> 2.000e-03`），但 `d=7` 為 `3.400e-03`（**`Λ_3D(5→7) = 0.59×`**）。原因在於 `7` 輪含測錯共 `511` 個故障點在高雜訊下會產生 `k > 10` 大連通叢集，觸發 Savings+2-Opt 近似路徑而非精確 Blossom，明確指出下一代 3D `d >= 7` 必須升級為純整數交替樹 Sparse Blossom。
+- **Stage B + Frontier 3 封頂突破 — 3D 時空精確 Edmonds' Blossom 解碼（[`qctrl/qctrl_decoder3d_ring0.h`](qctrl/qctrl_decoder3d_ring0.h)）**：以 Pure-GPR 實作 Safe-Component BFS（`d3d < bdist(i)+bdist(j)`）＋ Bitmask-DP（`k <= 8`）＋ **迭代整數 Edmonds' Blossom（`k <= 48`，雙整數雙倍權重 `w2 = 2*(b_i + b_j - d3d)` 與移位除 2，零遞迴、零除法、零 heap）**，於 `d` 輪含資料與量測雜訊的時空圖進行精確即時解碼：
+  - **正確性與 DP 等價性**：`40,510` 組 `data+meas` 混合故障（`d=3, 5` 全窮舉 `wt <= t` ＋ `5,000` 組 `d=7` `wt=3` 三元組）達成 **`0` 邏輯誤判**；另於 `500` 組 `d=7` 稠密叢集圖中驗證 Blossom 與精確 Bitmask-DP 權重 **`500/500` 零誤差一致**。
+  - **3D 單輪平均延遲（`p_data = p_meas = 0.003`）**：**`3.93 ns/rnd`（`11.8 ns/blk`，`d=3`） / `8.43 ns/rnd`（`42.1 ns/blk`，`d=5`） / `33.98 ns/rnd`（`237.8 ns/blk`，`d=7`）**，高階 `d=7` 比 `1,000 ns` 硬性時限快 **`29.4×`**。
+  - **全距 3D 指數抑錯恢復**：引入精確 Blossom 取代原本 `k > 10` 2-Opt 回退後，`p = 0.006` 下 `d=7` 失效率從原本 `3.400e-03` 暴降 **9.7×** 至 **`3.500e-04`**，實測達成全距指數抑錯：
+    - `d=3`: `8.050e-03` → `d=5`: `2.000e-03`（整塊 **`Λ_3D(3→5) = 4.02×`**，單輪 `6.71×`） → `d=7`: **`3.500e-04`**（整塊 **`Λ_3D(5→7) = 5.71×`**，單輪 `8.00×`）。
+    - 低雜訊 `p = 0.002` 下：`d=3/5/7` 分別為 `1.300e-03 / 1.500e-04 / 0.000e+00`。
 
 ### 4. 商業定位修正：從「賣通用量子算力」轉為「賣跨越門檻的控制＋解碼＋編譯鏟子」
 短期（2026–2028）真正的商業與工程 Alpha 不在於自建百萬位元機組破解密碼，而在於任何超導晶片團隊要從 40q Break-Even 邁向百位元級 Cultivation 實驗時，都必須依賴能同時壓低連貫 `ZZ`、滿足 `< 1 µs` 即時解碼與自動壓縮 `T-eq` 的全端基礎設施。
 
 ---
 
-## 三、深化進度與下一階段路線（Roadmap）
+## 三、深化里程碑（已全數閉環封頂）
 
-1. ~~**Frontier 1｜3D 時空容錯解碼（`d` 輪含測錯之純 GPR 3D MWPM）**~~：**已完成**（[`qctrl/qctrl_decoder3d_ring0.h`](qctrl/qctrl_decoder3d_ring0.h)，`40,510` 筆 `0` 誤判、`5.00–92.96 ns/rnd`、`Λ_3D(3→5)=4.00×`）。
+1. ~~**Frontier 1｜3D 時空容錯解碼（`d` 輪含測錯之純 GPR 3D MWPM）**~~：**已完成**（[`qctrl/qctrl_decoder3d_ring0.h`](qctrl/qctrl_decoder3d_ring0.h)，`40,510` 筆 `0` 誤判）。
 2. ~~**Frontier 2｜QAOA MaxCut-12 Wallace 3:2 壓縮跨越 Cultivation 懸崖**~~：**已完成**（[`qcc/qir_qaoa_mb.h`](qcc/qir_qaoa_mb.h) `T23d`，`T-eq: 553 -> 73`、Gen-2 Ring-0 `92,282` Q、解鎖 Cultivation **`3.38×`**）。
-3. **Frontier 3｜Pure-GPR 交替樹 Sparse Blossom（突破 3D `d >= 7` `k > 10` 高雜訊簇）**：以零 heap 固定陣列交替樹 Blossom 取代 `k > 10` Savings+2-Opt 回退路徑，在維持 Pure-GPR `< 1 µs/rnd` 硬實時性的同時恢復 `Λ_3D(5→7) > 1` 指數抑錯。
+3. ~~**Frontier 3｜Pure-GPR 迭代整數 Edmonds' Blossom（突破 3D `d >= 7` 高雜訊大簇）**~~：**已完成封頂**（`500/500` 與 Bitmask-DP 零誤差等價、`d=7` `33.98 ns/rnd`、`Λ_3D(5→7) = 5.71×`，全端架構自校準 → 2D/3D 解碼 → 編譯 → Cultivation 無殘餘工程缺口）。
