@@ -1,0 +1,6 @@
+module cartesian_guard
+mult cartesian
+flags 0
+input state_in 512
+stage0:64 = STAGE_PIPE state_in
+output stage0

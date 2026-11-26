@@ -49,12 +49,20 @@
 
 ---
 
+## 全端 FTQC 協同設計（[`include/pqc_ftqc_cultivation.h`](include/pqc_ftqc_cultivation.h)）
+
+- 以純整數定點（零 `<math.h>`）將 `../qctrl/build/qctrl_ftqc_profile.json` 的實測物理連貫 `ZZ` 雜訊、`d=3/5/7` Ring-0 解碼延遲與各 `.kmb` 基準電路深度/`T-eq` 結合，對比 **Magic State Cultivation (`dc=3/5`)** 與 **15-to-1 蒸餾** 的實體時空體積。
+- 執行 `make ftqc` 自動產生 [`../FTQC_CODESIGN_REPORT.md`](../FTQC_CODESIGN_REPORT.md) 與 `build/ftqc_codesign.json`，`selftest` 亦包含 `KAT_AND_FTQC_Invariants` 驗證閾值阻擋、單調性與 `N_T = 10^12` 溢位保護。
+
+---
+
 ## 建置與執行指令
 
 ```bash
 cd pqc
 make all      # 編譯 build/pqc
-make test     # 執行 C17/C++20 標頭檢查、KAT + 64-lane 雙種子自測與 qcc verify
+make test     # 執行 C17/C++20 標頭檢查、KAT + FTQC 不變量 + 64-lane 雙種子自測與 qcc verify
 make bench    # 編譯全系列基準並輸出 build/*.kmb、build/pqc_report.json 與 build/pqc_report.md
+make ftqc     # 產出全端 Cultivation 資源共設計戰報 ../FTQC_CODESIGN_REPORT.md 與 JSON
 ./build/pqc analyze build/aes128_grover.kmb --bits 128 --name AES128
 ```

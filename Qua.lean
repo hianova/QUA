@@ -17,7 +17,7 @@ namespace Qua
 def revAluFxpGraph : Flow.Morphism.Graph :=
   let b := Flow.Morphism.Builder.init "rev_alu_fxp" .linear true
   let (b, x) := b.input "x" 8; let (b, y) := b.input "y" 8
-  let (b, sq) := b.sqrFxp "sq" 8 x 4 4 4; let (b, sum) := b.add "sum" 8 sq y
+  let (b, sq) := b.sqrFxp "sq" 8 x 4 0 4; let (b, sum) := b.add "sum" 8 sq y
   let (b, ez) := b.eqZero "ez" x; let (b, res) := b.ctrlSel "res" 8 ez sum y
   b.build [res]
 

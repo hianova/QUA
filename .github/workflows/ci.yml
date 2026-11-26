@@ -46,14 +46,15 @@ jobs:
           fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
-      - name: Install Clang (Linux)
+      - name: Install Clang & Z3 (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang
+          sudo apt-get install -y clang z3
 
-      - name: Build FLOW & Run QUA QCC + PQC + Lean-FIR Gates
+      - name: Build FLOW & Run QUA Zero-Lean + QCC + QCtrl + PQC + FTQC Gates
         run: |
           export PATH="$HOME/.elan/bin:$PATH"
           make -C FLOW all CC=clang CXX=clang++
-          make -C QUA qcc pqc CC=clang CXX=clang++
+          make -C QUA qcc qctrl pqc ftqc LEAN=false CC=clang CXX=clang++
+          make -C QUA/qcc FLOW_DIR="$(pwd)/FLOW" lean-fir CC=clang CXX=clang++

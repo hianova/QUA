@@ -1,0 +1,11 @@
+module adder_csa_phase
+mult linear
+flags 1
+input a 8
+input b 8
+input c 8
+input d 8
+s1:8 = ADD a b
+s2:8 = ADD s1 c
+sum:8 = ADD s2 d
+output sum

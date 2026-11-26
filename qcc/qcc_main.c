@@ -6,6 +6,8 @@
 #include "qir_verify.h"
 #include "qir_pass_kmb.h"
 #include "qir_fir.h"
+#include "qir_qaoa_mb.h"
+#include "qcc_qasm.h"
 
 static bool qcc__ends_with(const char *s, const char *suf) {
     size_t ls = strlen(s), lsf = strlen(suf);
@@ -27,7 +29,42 @@ static void print_usage(FILE *out) {
             "  qcc opt <in.kmb|in.fir> -o <out.kmb> [--max-q N] [--metric default|qc|q2t|qt] [--iters N] [--verify-batches N] [--clean-anc] [--emit-clean-reg]\n"
             "  qcc verify <circuit.kmb> [--ref <ref.kmb|ref.fir>] [--states N] [--in-regs N]\n"
             "  qcc inspect <circuit.kmb>\n"
+            "  qcc export-qasm <in.kmb> -o <out.qasm>\n"
+            "  qcc emit-bench <out_dir>\n"
             "  qcc selftest\n");
+}
+
+static int cmd_export_qasm(int argc, char **argv) {
+    const char *in_path = NULL, *out_path = NULL;
+    for (int i = 2; i < argc; ++i) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printf("Usage: qcc export-qasm <in.kmb> -o <out.qasm>\n");
+            return 0;
+        } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            out_path = argv[++i];
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "Error: unknown option '%s'\n", argv[i]);
+            return 2;
+        } else if (!in_path) {
+            in_path = argv[i];
+        }
+    }
+    if (!in_path || !out_path) {
+        fprintf(stderr, "Usage: qcc export-qasm <in.kmb> -o <out.qasm>\n");
+        return 2;
+    }
+    qcc_kmb_circuit_t kmb;
+    qcc_kmb_fiber_t rf = qcc_kmb_read(&kmb, in_path);
+    if (rf != QCC_KMB_FIBER_COMMITTED) {
+        fprintf(stderr, "Error: failed to read %s (%s)\n", in_path, qcc_kmb_fiber_name(rf));
+        return 1;
+    }
+    uint64_t lines = 0u;
+    bool ok = qcc_kmb_write_openqasm3(&kmb, out_path, &lines);
+    printf("[qcc export-qasm] %s -> %s | lines=%llu | %s\n",
+           in_path, out_path, (unsigned long long)lines, ok ? "OK" : "FAIL");
+    qcc_kmb_free(&kmb);
+    return ok ? 0 : 1;
 }
 
 static int cmd_inspect(int argc, char **argv) {
@@ -1464,8 +1501,220 @@ static int cmd_selftest(void) {
         qcc_arena_free(&ar);
     }
 
+    /* T23: QAOA MaxCut-12 Cost-Phase Oracle (Base vs Popcount-LUT Opt) & 2D 4x4 Ising Trotter */
+    qcc_kmb_stats_t st23a;
+    memset(&st23a, 0, sizeof(st23a));
+    {
+        static const uint8_t kMaxCut12Edges[18][2] = {
+            {0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6},
+            {6, 7}, {7, 8}, {8, 9}, {9, 10}, {10, 11}, {11, 0},
+            {0, 6}, {1, 7}, {2, 8}, {3, 9}, {4, 10}, {5, 11}
+        };
+        qcc_arena_t ar; qcc_arena_init(&ar, 1024u * 1024u);
+        qir_module_t m; qir_module_init(&m, &ar, "t23a_qaoa_maxcut12");
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        cfg.require_clean_scratch = true;
+        if (!qir_build_qaoa_maxcut_qir(&m, 12u, kMaxCut12Edges, 18u) ||
+            (qir_recompute_zero_masks(&m), false) ||
+            !test_compile_and_verify("T23a_QAOA_MaxCut12_CleanPhase", &m, &ar, &cfg, 16u, false, false, false, 0u, &st23a) ||
+            st23a.toffoli == 0u || st23a.z_pow == 0u) {
+            printf("  FAIL [T23a expected QAOA CCX>0 & ZP>0, got CCX=%llu ZP=%llu]\n",
+                   (unsigned long long)st23a.toffoli, (unsigned long long)st23a.z_pow);
+            fails++;
+        }
+        qir_module_free(&m);
+        qcc_arena_free(&ar);
+    }
+    {
+        static const uint8_t kMaxCut12Edges[18][2] = {
+            {0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6},
+            {6, 7}, {7, 8}, {8, 9}, {9, 10}, {10, 11}, {11, 0},
+            {0, 6}, {1, 7}, {2, 8}, {3, 9}, {4, 10}, {5, 11}
+        };
+        qcc_arena_t ar; qcc_arena_init(&ar, 1024u * 1024u);
+        qir_module_t m; qir_module_init(&m, &ar, "t23c_qaoa_maxcut12_opt");
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        cfg.require_clean_scratch = true;
+        qcc_kmb_stats_t st;
+        if (!qir_build_qaoa_maxcut_opt_qir(&m, 12u, kMaxCut12Edges, 18u) ||
+            (qir_recompute_zero_masks(&m), false) ||
+            !test_compile_and_verify("T23c_QAOA_MaxCut12_PopLUT_Opt", &m, &ar, &cfg, 16u, false, false, false, 0u, &st) ||
+            st.toffoli == 0u || st.z_pow == 0u ||
+            st.num_qubits >= st23a.num_qubits || st.toffoli >= st23a.toffoli) {
+            printf("  FAIL [T23c expected Q<%u CCX<%llu, got Q=%u CCX=%llu]\n",
+                   (unsigned)st23a.num_qubits, (unsigned long long)st23a.toffoli,
+                   (unsigned)st.num_qubits, (unsigned long long)st.toffoli);
+            fails++;
+        }
+        qir_module_free(&m);
+        qcc_arena_free(&ar);
+    }
+    {
+        qcc_arena_t ar; qcc_arena_init(&ar, 1024u * 1024u);
+        qir_module_t m; qir_module_init(&m, &ar, "t23b_ising4x4_trotter");
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        cfg.require_clean_scratch = true;
+        qcc_kmb_stats_t st;
+        if (!qir_build_ising_trotter_qir(&m, 4u, 4u) ||
+            (qir_recompute_zero_masks(&m), false) ||
+            !test_compile_and_verify("T23b_Ising4x4_ManyBody_Trotter", &m, &ar, &cfg, 16u, false, true, false, 0u, &st) ||
+            st.num_qubits != 16u || st.z_pow == 0u) {
+            printf("  FAIL [T23b expected Q=16 CCX=0 ZP>0, got Q=%u CCX=%llu ZP=%llu]\n",
+                   (unsigned)st.num_qubits, (unsigned long long)st.toffoli, (unsigned long long)st.z_pow);
+            fails++;
+        }
+        qir_module_free(&m);
+        qcc_arena_free(&ar);
+    }
+
+    /* T24: 2D 4x4 Plaquette LGT (4-body ZZZZ + 2-body ZZ + 1-body Z, 0-CCX) */
+    {
+        qcc_arena_t ar; qcc_arena_init(&ar, 1024u * 1024u);
+        qir_module_t m; qir_module_init(&m, &ar, "t24_plaquette4x4_lgt");
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        cfg.require_clean_scratch = true;
+        qcc_kmb_stats_t st;
+        if (!qir_build_plaquette_lgt_qir(&m, 4u, 4u) ||
+            (qir_recompute_zero_masks(&m), false) ||
+            !test_compile_and_verify("T24_Plaquette4x4_LGT_Trotter", &m, &ar, &cfg, 16u, false, true, false, 0u, &st) ||
+            st.num_qubits != 16u || st.toffoli != 0u || st.z_pow != 49u) {
+            printf("  FAIL [T24 expected Q=16 CCX=0 ZP=49, got Q=%u CCX=%llu ZP=%llu]\n",
+                   (unsigned)st.num_qubits, (unsigned long long)st.toffoli, (unsigned long long)st.z_pow);
+            fails++;
+        }
+        qir_module_free(&m);
+        qcc_arena_free(&ar);
+    }
+
+    /* T25: 12-Variable, 8-Clause 3-SAT Grover Phase Oracle with Clean Ancilla Uncomputation */
+    {
+        static const int8_t kSat12Clauses[8][3] = {
+            { 1, -2,  3}, {-1,  4,  5}, { 2, -4,  6}, {-3,  5, -7},
+            { 6,  7, -8}, { 8, -9, 10}, {-10, 11, 12}, {-11, 12, 1}
+        };
+        qcc_arena_t ar; qcc_arena_init(&ar, 1024u * 1024u);
+        qir_module_t m; qir_module_init(&m, &ar, "t25_ksat12_grover");
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        cfg.require_clean_scratch = true;
+        qcc_kmb_stats_t st;
+        if (!qir_build_ksat_oracle_qir(&m, 12u, kSat12Clauses, 8u) ||
+            (qir_recompute_zero_masks(&m), false) ||
+            !test_compile_and_verify("T25_KSAT12_Grover_Oracle", &m, &ar, &cfg, 16u, false, false, false, 0u, &st) ||
+            st.toffoli == 0u) {
+            printf("  FAIL [T25 expected CCX>0, got CCX=%llu ZP=%llu]\n",
+                   (unsigned long long)st.toffoli, (unsigned long long)st.z_pow);
+            fails++;
+        }
+        qir_module_free(&m);
+        qcc_arena_free(&ar);
+    }
+
+    /* T26: OpenQASM 3.0 Exporter Sanity & Gate/Condition Preservation */
+    {
+        qcc_kmb_circuit_t k;
+        qcc_kmb_init(&k);
+        uint32_t qs[4] = {0u, 1u, 2u, 3u};
+        uint32_t bs[2] = {0u, 1u};
+        qcc_kmb_add_quantum_reg(&k, "q", qs, 4u);
+        qcc_kmb_add_classical_reg(&k, "c", bs, 2u);
+        qcc_kmb_and_compute(&k, 0u, 1u, 2u);
+        qcc_kmb_z_pow_f64(&k, 2u, 0.125);
+        qcc_kmb_cx(&k, 2u, 3u);
+        qcc_kmb_and_uncompute(&k, 0u, 1u, 2u, 0u);
+        qcc_kmb_z_pow_f64(&k, 3u, 0.0625);
+
+        FILE *tf = tmpfile();
+        uint64_t qasm_lines = 0u;
+        bool qok = (tf != NULL) && qcc_kmb_export_openqasm3(&k, tf, &qasm_lines);
+        char qbuf[4096];
+        memset(qbuf, 0, sizeof(qbuf));
+        if (qok) {
+            rewind(tf);
+            size_t nr = fread(qbuf, 1u, sizeof(qbuf) - 1u, tf);
+            qbuf[nr] = '\0';
+            int ob = 0, cb = 0;
+            for (size_t i = 0u; i < nr; ++i) {
+                if (qbuf[i] == '{') ob++;
+                else if (qbuf[i] == '}') cb++;
+            }
+            qok = (strstr(qbuf, "OPENQASM 3.0;") != NULL) &&
+                  (strstr(qbuf, "ctrl(2) @ x q[") != NULL) &&
+                  (strstr(qbuf, "t q[") != NULL) &&
+                  (strstr(qbuf, "if (c[") != NULL) &&
+                  (strstr(qbuf, "rz(") != NULL) &&
+                  (ob > 0 && ob == cb);
+        }
+        if (tf) fclose(tf);
+        qcc_kmb_free(&k);
+        printf("  %-34s | lines=%llu gates=(ccx,t,if,rz) | %s\n",
+               "T26_OpenQASM3_Export_Check", (unsigned long long)qasm_lines, qok ? "PASS" : "FAIL");
+        if (!qok) fails++;
+    }
+
     printf("=== Selftest Summary: %s (fails=%d) ===\n", fails == 0 ? "ALL PASS" : "FAILED", fails);
     return fails == 0 ? 0 : 1;
+}
+
+static int cmd_emit_bench(int argc, char **argv) {
+    const char *out_dir = (argc >= 3 && argv[2][0] != '-') ? argv[2] : "build";
+    static const uint8_t kMaxCut12Edges[18][2] = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6},
+        {6, 7}, {7, 8}, {8, 9}, {9, 10}, {10, 11}, {11, 0},
+        {0, 6}, {1, 7}, {2, 8}, {3, 9}, {4, 10}, {5, 11}
+    };
+    static const int8_t kSat12Clauses[8][3] = {
+        { 1, -2,  3}, {-1,  4,  5}, { 2, -4,  6}, {-3,  5, -7},
+        { 6,  7, -8}, { 8, -9, 10}, {-10, 11, 12}, {-11, 12, 1}
+    };
+    const char *names[5] = {
+        "qaoa_maxcut12", "qaoa_maxcut12_opt", "ising4x4_trotter",
+        "plaquette4x4_lgt", "ksat12_grover"
+    };
+    int rc = 0;
+
+    for (int bi = 0; bi < 5; ++bi) {
+        qcc_arena_t ar; qcc_arena_init(&ar, 2048u * 1024u);
+        qir_module_t m; qir_module_init(&m, &ar, names[bi]);
+        bool ok = false;
+        if (bi == 0)      ok = qir_build_qaoa_maxcut_qir(&m, 12u, kMaxCut12Edges, 18u);
+        else if (bi == 1) ok = qir_build_qaoa_maxcut_opt_qir(&m, 12u, kMaxCut12Edges, 18u);
+        else if (bi == 2) ok = qir_build_ising_trotter_qir(&m, 4u, 4u);
+        else if (bi == 3) ok = qir_build_plaquette_lgt_qir(&m, 4u, 4u);
+        else              ok = qir_build_ksat_oracle_qir(&m, 12u, kSat12Clauses, 8u);
+        if (!ok) { rc = 1; qir_module_free(&m); qcc_arena_free(&ar); continue; }
+        qir_recompute_zero_masks(&m);
+        qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
+        cfg.require_clean_scratch = true;
+        qir_egraph_t eg; qir_phys_plan_t plan;
+        qcc_kmb_circuit_t kmb;
+        if (!qir_optimize_module(&m, &ar, &cfg, &eg, &plan) || !qir_codegen_emit(&plan, &kmb)) {
+            rc = 1;
+            qir_module_free(&m); qcc_arena_free(&ar);
+            continue;
+        }
+        qir_kmb_pass_stats_t ps;
+        qir_pass_kmb_optimize_with_plan(&kmb, &plan, &ps);
+        qcc_kmb_stats_t ks;
+        qcc_kmb_recompute_stats(&kmb, &ks);
+        qir_verify_report_t vrep;
+        bool vok = qir_verify_kmb_vs_qir(&kmb, &m, &plan, 64u, UINT64_C(0xBEEF2026), false, 0u, &vrep);
+        char path[512], qasm_path[512];
+        snprintf(path, sizeof(path), "%s/%s.kmb", out_dir, names[bi]);
+        snprintf(qasm_path, sizeof(qasm_path), "%s/%s.qasm", out_dir, names[bi]);
+        qcc_kmb_fiber_t wf = qcc_kmb_write(&kmb, path);
+        uint64_t qasm_lines = 0u;
+        bool qok = qcc_kmb_write_openqasm3(&kmb, qasm_path, &qasm_lines);
+        if (!vok || wf != QCC_KMB_FIBER_COMMITTED || !qok) rc = 1;
+        printf("[qcc emit-bench] %s -> %s (+ .qasm %llu lines) | Q=%u CCX=%llu Z_POW=%llu CNOT=%llu D_toff=%llu D_circ=%llu | verify=%s (%llu states)\n",
+               names[bi], path, (unsigned long long)qasm_lines, (unsigned)ks.num_qubits,
+               (unsigned long long)ks.toffoli, (unsigned long long)ks.z_pow,
+               (unsigned long long)ks.cnot, (unsigned long long)ks.toffoli_depth,
+               (unsigned long long)ks.circuit_depth, vok ? "PASS" : "FAIL",
+               (unsigned long long)vrep.states_tested);
+        qcc_kmb_free(&kmb); qir_phys_plan_free(&plan); qir_egraph_free(&eg);
+        qir_module_free(&m); qcc_arena_free(&ar);
+    }
+    return rc;
 }
 
 int main(int argc, char **argv) {
@@ -1477,10 +1726,12 @@ int main(int argc, char **argv) {
         print_usage(stdout);
         return 0;
     }
-    if (strcmp(argv[1], "opt") == 0)      return cmd_opt(argc, argv);
-    if (strcmp(argv[1], "verify") == 0)   return cmd_verify(argc, argv);
-    if (strcmp(argv[1], "inspect") == 0)  return cmd_inspect(argc, argv);
-    if (strcmp(argv[1], "selftest") == 0) return cmd_selftest();
+    if (strcmp(argv[1], "opt") == 0)         return cmd_opt(argc, argv);
+    if (strcmp(argv[1], "verify") == 0)      return cmd_verify(argc, argv);
+    if (strcmp(argv[1], "inspect") == 0)     return cmd_inspect(argc, argv);
+    if (strcmp(argv[1], "export-qasm") == 0) return cmd_export_qasm(argc, argv);
+    if (strcmp(argv[1], "emit-bench") == 0)  return cmd_emit_bench(argc, argv);
+    if (strcmp(argv[1], "selftest") == 0)    return cmd_selftest();
     fprintf(stderr, "Unknown subcommand: %s\n", argv[1]);
     print_usage(stderr);
     return 2;

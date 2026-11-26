@@ -1,5 +1,6 @@
 #define QCTRL_EXPORT_RING0 1
 #include "qctrl_ring0.h"
+#include "qctrl_decoder_ring0.h"
 
 bool qctrl_edge_step_ring0_export(qctrl_edge_state_t *st, const qctrl_cfg_t *cfg, int32_t km,
                                   int32_t k0, int32_t kp, int32_t n_shots) {
@@ -22,4 +23,17 @@ uint32_t qctrl_grid40_color_sweep_ring0(qctrl_edge_state_t states[QCTRL_NUM_EDGE
         }
     }
     return acts;
+}
+
+bool qctrl_sc_init_ring0_export(qctrl_sc_code_t *code, uint32_t d) {
+    return qctrl_sc_init_ring0(code, d);
+}
+
+uint64_t qctrl_sc_decode_ring0_export(const qctrl_sc_code_t *code, uint32_t synd, bool is_z_err) {
+    return qctrl_sc_decode_ring0(code, synd, is_z_err);
+}
+
+bool qctrl_synd_monitor_step_ring0_export(qctrl_synd_monitor_t *mon, uint32_t synd_x,
+                                          uint32_t synd_z, uint32_t n_stab_per_type) {
+    return qctrl_synd_monitor_step_ring0(mon, synd_x, synd_z, n_stab_per_type);
 }

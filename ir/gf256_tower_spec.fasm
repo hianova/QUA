@@ -1,0 +1,34 @@
+module gf256_tower_spec
+mult linear
+flags 1
+input a 8
+q_x0:4 = SLICE a 0
+q_x1:4 = SLICE a 4
+q_lsq_b0:1 = SLICE a 0
+q_lsq_b1:1 = SLICE a 1
+q_lsq_b2:1 = SLICE a 2
+q_lsq_b3:1 = SLICE a 3
+q_lsq_b4:1 = SLICE a 4
+q_lsq_b5:1 = SLICE a 5
+q_lsq_b6:1 = SLICE a 6
+q_lsq_b7:1 = SLICE a 7
+q_lsq_r0_0:1 = XOR_VEC q_lsq_b0 q_lsq_b2
+q_lsq_r0_1:1 = XOR_VEC q_lsq_r0_0 q_lsq_b6
+q_lsq_r1_0:1 = XOR_VEC q_lsq_b2 q_lsq_b5
+q_lsq_r1_1:1 = XOR_VEC q_lsq_r1_0 q_lsq_b6
+q_lsq_r1_2:1 = XOR_VEC q_lsq_r1_1 q_lsq_b7
+q_lsq_r2_0:1 = XOR_VEC q_lsq_b1 q_lsq_b3
+q_lsq_r2_1:1 = XOR_VEC q_lsq_r2_0 q_lsq_b5
+q_lsq_r3_0:1 = XOR_VEC q_lsq_b3 q_lsq_b4
+q_lsq_r3_1:1 = XOR_VEC q_lsq_r3_0 q_lsq_b6
+q_lsq_r3_2:1 = XOR_VEC q_lsq_r3_1 q_lsq_b7
+q_lsq_c0_0:4 = CONCAT q_lsq_r0_1 q_lsq_r1_2 q_lsq_r2_1 q_lsq_r3_2
+q_p01:4 = GF2M_MUL q_x0 q_x1 4 0x13
+q_del:4 = XOR_VEC q_p01 q_lsq_c0_0
+q_inv:4 = GF2M_INV q_del 4 0x13
+q_x01:4 = XOR_VEC q_x0 q_x1
+q_y0:4 = GF2M_MUL q_x01 q_inv 4 0x13
+q_y1:4 = GF2M_MUL q_x1 q_inv 4 0x13
+q_out:8 = CONCAT q_y0 q_y1
+y:8 = SLICE q_out 0
+output y

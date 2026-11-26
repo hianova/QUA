@@ -6,9 +6,9 @@ CXX      ?= c++
 CFLAGS   := -std=c17 -O3 -Wall -Wextra -Werror -I$(FLOW_DIR)/core -I$(FLOW_DIR)/sdk -I$(QCC_DIR) -Iinclude
 BUILD    := build
 TARGET   := $(BUILD)/pqc
-HDRS     := include/pqc_nist_est.h include/pqc_oracles.h
+HDRS     := include/pqc_nist_est.h include/pqc_oracles.h include/pqc_ftqc_cultivation.h
 
-.PHONY: all check-headers test bench clean
+.PHONY: all check-headers test bench ftqc clean
 
 all: $(TARGET)
 
@@ -29,6 +29,9 @@ test: $(TARGET) check-headers
 
 bench: $(TARGET)
 	./$(TARGET) bench $(BUILD) --json $(BUILD)/pqc_report.json --md $(BUILD)/pqc_report.md
+
+ftqc: $(TARGET) test
+	./$(TARGET) ftqc-suite --profile ../qctrl/build/qctrl_ftqc_profile.json --qcc-dir $(QCC_DIR)/build --report ../FTQC_CODESIGN_REPORT.md --json $(BUILD)/ftqc_codesign.json
 
 clean:
 	rm -rf $(BUILD)

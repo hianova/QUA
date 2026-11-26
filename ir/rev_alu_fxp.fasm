@@ -1,0 +1,10 @@
+module rev_alu_fxp
+mult linear
+flags 1
+input x 8
+input y 8
+sq:8 = SQR_FXP x 4 4
+sum:8 = ADD sq y
+ez:1 = EQ_ZERO x
+res:8 = CTRL_SEL ez sum y
+output res

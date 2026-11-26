@@ -10,6 +10,7 @@
 #include "qir_verify.h"
 #include "pqc_oracles.h"
 #include "pqc_nist_est.h"
+#include "pqc_ftqc_cultivation.h"
 
 #include <sys/stat.h>
 #include <time.h>
@@ -506,6 +507,34 @@ static bool pqc_run_classical_kats(void) {
         fprintf(stderr, "NIST category classification sanity check failed\n");
         return false;
     }
+    /* 5. Pure-integer FTQC Cultivation & No-Cal / Fallback Invariants */
+    {
+        pqc_hw_cal_profile_t prof_nocal = {"No-Cal", 996000u, 530u, 300u, 156u, 156u, 0u, 0u};
+        pqc_hw_cal_profile_t prof_ring0 = {"Ring-0", 998500u, 530u, 300u,  32u,  32u, 361u, 12000u};
+        pqc_hw_cal_profile_t prof_ultralow = {"Ultra", 999000u, 530u, 300u, 20u, 20u, 300u, 12000u};
+        pqc_ftqc_design_t d_nc, d_r0_100, d_r0_big, d_ul_10;
+
+        pqc_ftqc_codesign(&prof_nocal, 16u, 88ULL, 7ULL, &d_nc);
+        if (d_nc.below_sc_threshold || d_nc.d_data != 0u || d_nc.cult_viable) {
+            fprintf(stderr, "SELFTEST FAIL: FTQC No-Cal invariant (expected ABOVE_TH)\n");
+            return false;
+        }
+        pqc_ftqc_codesign(&prof_ring0, 16u, 88ULL, 7ULL, &d_r0_100);
+        if (!d_r0_100.below_sc_threshold || !d_r0_100.cult_viable || d_r0_100.vol_reduction_q8 <= 256u) {
+            fprintf(stderr, "SELFTEST FAIL: FTQC Ring-0 Gen-2 cultivation invariant\n");
+            return false;
+        }
+        pqc_ftqc_codesign(&prof_ultralow, 10u, 10ULL, 5ULL, &d_ul_10);
+        if (!d_ul_10.cult_viable || d_ul_10.cult_d != 3u || d_ul_10.p_eff_ppb >= d_r0_100.p_eff_ppb) {
+            fprintf(stderr, "SELFTEST FAIL: FTQC dc=3 & monotonicity invariant\n");
+            return false;
+        }
+        pqc_ftqc_codesign(&prof_ring0, 200u, 1000000000000ULL, 1000000000ULL, &d_r0_big);
+        if (d_r0_big.cult_viable || d_r0_big.vol_reduction_q8 != 256u) {
+            fprintf(stderr, "SELFTEST FAIL: FTQC N_T=10^12 fallback/overflow invariant\n");
+            return false;
+        }
+    }
     return true;
 }
 
@@ -524,7 +553,7 @@ static int cmd_selftest(int argc, char **argv) {
     }
     printf("=== PQC Quantum Cryptanalysis Compiler Selftest ===\n");
     if (!pqc_run_classical_kats()) return 1;
-    printf("  KAT_FIPS197_FIPS180_SP800232       | AES-128/192/256 + SHA-256 + Ascon-p[12] | PASS\n");
+    printf("  %-34s | AES-128/192/256 + SHA-256 + Ascon-p[12] + FTQC | PASS\n", "KAT_AND_FTQC_Invariants");
 
     uint8_t aes_pt[16], aes_key[32], sha_msg[32], ascon_key[16], keccak_seed[16], lwe_sol[3];
     uint64_t ascon_iv_n[3], isd_h[24];
@@ -1153,13 +1182,386 @@ static int cmd_analyze(int argc, char **argv) {
     return 0;
 }
 
+static uint32_t pqc__parse_scaled100_after(const char *buf, const char *key, uint32_t fallback) {
+    const char *p = strstr(buf, key);
+    if (!p) return fallback;
+    const char *col = strchr(p, ':');
+    if (!col) return fallback;
+    const char *s = col + 1;
+    while (*s == ' ' || *s == '\t') ++s;
+    uint32_t whole = 0u, frac = 0u, fdigs = 0u;
+    if (*s < '0' || *s > '9') return fallback;
+    while (*s >= '0' && *s <= '9') {
+        whole = whole * 10u + (uint32_t)(*s - '0');
+        ++s;
+    }
+    if (*s == '.') {
+        ++s;
+        while (*s >= '0' && *s <= '9') {
+            if (fdigs < 2u) {
+                frac = frac * 10u + (uint32_t)(*s - '0');
+                ++fdigs;
+            }
+            ++s;
+        }
+    }
+    while (fdigs < 2u) {
+        frac *= 10u;
+        ++fdigs;
+    }
+    return whole * 100u + frac;
+}
+
+static bool pqc__load_qctrl_profiles(
+    const char *path,
+    pqc_hw_cal_profile_t profs[4],
+    pqc_decoder_summary_t *dec_out
+) {
+    /* Defaults match measured qctrl bench40 baselines in case custom path is absent */
+    static const pqc_hw_cal_profile_t kDefaults[4] = {
+        {"No-Cal (Pure QEC)",            996000u, 530u, 300u, 156u, 156u,   0u,     0u},
+        {"Periodic Offline (q20 ep)",    996000u, 530u, 300u,  69u,  69u, 264u,     0u},
+        {"Single-Step 3sig Schmitt",     996000u, 530u, 300u,  57u,  57u, 937u,     0u},
+        {"FLOW-QCtrl Ring-0 (Huber+PS)", 996000u, 530u, 300u,  32u,  32u, 361u, 12000u}
+    };
+    memcpy(profs, kDefaults, sizeof(kDefaults));
+    dec_out->ring0_cal_sweep_ns    = 12000u;
+    dec_out->decoder_d3_ns_x100    = 250u;
+    dec_out->decoder_d5_ns_x100    = 450u;
+    dec_out->decoder_d7_ns_x100    = 800u;
+    dec_out->lambda_d3_to_d5_x100  = 600u;
+    dec_out->lambda_d5_to_d7_x100  = 580u;
+
+    if (!path) return false;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return false;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return false; }
+    long sz = ftell(fp);
+    if (sz <= 0 || sz > 262144L) { fclose(fp); return false; }
+    rewind(fp);
+    char *buf = (char *)malloc((size_t)sz + 1u);
+    if (!buf) { fclose(fp); return false; }
+    size_t nr = fread(buf, 1u, (size_t)sz, fp);
+    fclose(fp);
+    buf[nr] = '\0';
+
+    const char *rn = strstr(buf, "\"ring0_ns_per_40q_sweep\"");
+    if (rn) {
+        const char *col = strchr(rn, ':');
+        if (col) dec_out->ring0_cal_sweep_ns = (uint32_t)strtoul(col + 1, NULL, 10);
+    }
+    dec_out->decoder_d3_ns_x100   = pqc__parse_scaled100_after(buf, "\"decoder_d3_ns\"", dec_out->decoder_d3_ns_x100);
+    dec_out->decoder_d5_ns_x100   = pqc__parse_scaled100_after(buf, "\"decoder_d5_ns\"", dec_out->decoder_d5_ns_x100);
+    dec_out->decoder_d7_ns_x100   = pqc__parse_scaled100_after(buf, "\"decoder_d7_ns\"", dec_out->decoder_d7_ns_x100);
+    dec_out->lambda_d3_to_d5_x100 = pqc__parse_scaled100_after(buf, "\"lambda_d3_to_d5\"", dec_out->lambda_d3_to_d5_x100);
+    dec_out->lambda_d5_to_d7_x100 = pqc__parse_scaled100_after(buf, "\"lambda_d5_to_d7\"", dec_out->lambda_d5_to_d7_x100);
+
+    const char *targets[4] = {
+        "No-Cal (Pure QEC)",
+        "Periodic Offline (q20 ep)",
+        "Single-Step 3sig Schmitt",
+        "FLOW-QCtrl Ring-0 (Huber+PS)"
+    };
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        const char *blk = strstr(buf, targets[i]);
+        if (!blk) continue;
+        const char *line_end = strchr(blk, '\n');
+        const char *end = line_end ? line_end : (buf + nr);
+        const char *pm = strstr(blk, "\"patch_rms_mrad\"");
+        if (pm && pm < end) {
+            const char *c = strchr(pm, ':');
+            if (c) profs[i].patch_rms_mrad = (uint32_t)strtoul(c + 1, NULL, 10);
+        }
+        const char *sm = strstr(blk, "\"seam_rms_mrad\"");
+        if (sm && sm < end) {
+            const char *c = strchr(sm, ':');
+            if (c) profs[i].seam_rms_mrad = (uint32_t)strtoul(c + 1, NULL, 10);
+        }
+        const char *ac = strstr(blk, "\"acts_per_6700\"");
+        if (ac && ac < end) {
+            const char *c = strchr(ac, ':');
+            if (c) profs[i].acts_per_6700 = (uint32_t)strtoul(c + 1, NULL, 10);
+        }
+        profs[i].ring0_ns_sweep = (i == 3u) ? dec_out->ring0_cal_sweep_ns : 0u;
+    }
+    free(buf);
+    return true;
+}
+
+static int cmd_ftqc_suite(int argc, char **argv) {
+    const char *prof_path = "../qctrl/build/qctrl_ftqc_profile.json";
+    const char *qcc_dir   = "../qcc/build";
+    const char *rep_path  = "../FTQC_CODESIGN_REPORT.md";
+    const char *json_path = NULL;
+    for (int i = 2; i < argc; ++i) {
+        if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) prof_path = argv[++i];
+        else if (strcmp(argv[i], "--qcc-dir") == 0 && i + 1 < argc) qcc_dir = argv[++i];
+        else if (strcmp(argv[i], "--report") == 0 && i + 1 < argc) rep_path = argv[++i];
+        else if (strcmp(argv[i], "--json") == 0 && i + 1 < argc) json_path = argv[++i];
+    }
+
+    pqc_hw_cal_profile_t base_profs[4];
+    pqc_decoder_summary_t dec_sum;
+    bool loaded_prof = pqc__load_qctrl_profiles(prof_path, base_profs, &dec_sum);
+
+    typedef struct {
+        const char     *name;
+        const char     *domain;
+        qcc_kmb_stats_t st;
+        uint64_t        t_eq;
+        uint64_t        t_depth;
+    } ftqc_app_t;
+
+    ftqc_app_t apps[8];
+    uint32_t n_apps = 0u;
+
+    const char *kmb_files[7][3] = {
+        {"QAOA_MaxCut12_Base", "ApproxOpt x QEC",   "qaoa_maxcut12.kmb"},
+        {"QAOA_MaxCut12_Opt",  "PopLUT Opt QAOA",   "qaoa_maxcut12_opt.kmb"},
+        {"Ising4x4_Trotter",   "Many-Body 2Q-Gate", "ising4x4_trotter.kmb"},
+        {"Plaquette4x4_LGT",   "Lattice Gauge 4B",  "plaquette4x4_lgt.kmb"},
+        {"KSAT12_Grover",      "NP Combinatorial",  "ksat12_grover.kmb"},
+        {"GF256_SEARU_A32",    "Post-Quantum SBox", "gf256_tower_a32.kmb"},
+        {"AES128_10R_Fwd",     "PQC AES-128",       "selftest_aes128_fwd.kmb"}
+    };
+
+    for (uint32_t i = 0u; i < 7u; ++i) {
+        char pbuf[512];
+        if (i < 6u) snprintf(pbuf, sizeof(pbuf), "%s/%s", qcc_dir, kmb_files[i][2]);
+        else        snprintf(pbuf, sizeof(pbuf), "build/%s", kmb_files[i][2]);
+
+        qcc_kmb_circuit_t kmb;
+        if (qcc_kmb_read(&kmb, pbuf) != QCC_KMB_FIBER_COMMITTED) {
+            fprintf(stderr, "[ftqc-suite] Note: %s not found, skipping.\n", pbuf);
+            continue;
+        }
+        qcc_kmb_stats_t ks;
+        qcc_kmb_recompute_stats(&kmb, &ks);
+        qcc_kmb_free(&kmb);
+
+        apps[n_apps].name    = kmb_files[i][0];
+        apps[n_apps].domain  = kmb_files[i][1];
+        apps[n_apps].st      = ks;
+        apps[n_apps].t_eq    = 4ULL * ks.toffoli + ks.t_like + ks.non_clifford_z_pow * 4ULL;
+        if (apps[n_apps].t_eq == 0ULL) apps[n_apps].t_eq = 1ULL;
+        apps[n_apps].t_depth = ks.toffoli_depth ? ks.toffoli_depth : (ks.circuit_depth ? ks.circuit_depth : 1ULL);
+        n_apps++;
+    }
+    if (n_apps == 0u) {
+        fprintf(stderr, "[ftqc-suite] ERROR: no compiled .kmb circuits found.\n");
+        return 1;
+    }
+
+    FILE *rp = fopen(rep_path, "w");
+    if (!rp) {
+        fprintf(stderr, "[ftqc-suite] ERROR: cannot open %s\n", rep_path);
+        return 1;
+    }
+
+    fprintf(rp, "# QUA Full-Stack FTQC Co-Design Report (`qctrl Ring-0` × `qcc` × `Magic State Cultivation`)\n\n");
+    fprintf(rp, "- **Profile Source**: `%s` (%s, Ring-0 40q sweep = `%u ns`)\n",
+            prof_path, loaded_prof ? "live measured qctrl bench40" : "default fallback",
+            (unsigned)dec_sum.ring0_cal_sweep_ns);
+    fprintf(rp, "- **Fixed-Point Engine**: Pure C17 integer `pqc_ftqc_cultivation.h` (zero `<math.h>`)\n\n");
+
+    fprintf(rp, "## 1. Verified Logical Benchmarks (`qcc` + `pqc` Compiled `.kmb` Artifacts)\n\n");
+    fprintf(rp, "| Benchmark | Frontier Domain | Logical Q | CCX | Z_POW / T | T-eq (Cult/Gidney) | T/Circ Depth |\n");
+    fprintf(rp, "| :--- | :--- | ---: | ---: | ---: | ---: | ---: |\n");
+    for (uint32_t a = 0u; a < n_apps; ++a) {
+        fprintf(rp, "| `%s` | %s | %u | %llu | %llu | %llu | %llu |\n",
+                apps[a].name, apps[a].domain, (unsigned)apps[a].st.num_qubits,
+                (unsigned long long)apps[a].st.toffoli,
+                (unsigned long long)(apps[a].st.z_pow + apps[a].st.t_like),
+                (unsigned long long)apps[a].t_eq, (unsigned long long)apps[a].t_depth);
+    }
+
+    fprintf(rp, "\n## 2. Ring-0 Real-Time QEC Decoder & Cycle Deadline Budget (`1,000 ns`)\n\n");
+    fprintf(rp, "| Surface Code Distance | Measured Ring-0 Decode Latency | `1,000 ns` Budget Headroom | Below-Threshold Suppression `Λ` |\n");
+    fprintf(rp, "| :---: | :---: | :---: | :---: |\n");
+    fprintf(rp, "| `d = 3` | **`%.2f ns / round`** | %.1fx faster | baseline |\n",
+            (double)dec_sum.decoder_d3_ns_x100 / 100.0,
+            1000.0 / (dec_sum.decoder_d3_ns_x100 > 0u ? ((double)dec_sum.decoder_d3_ns_x100 / 100.0) : 1.0));
+    fprintf(rp, "| `d = 5` | **`%.2f ns / round`** | %.1fx faster | **`Λ(3→5) = %.2fx`** |\n",
+            (double)dec_sum.decoder_d5_ns_x100 / 100.0,
+            1000.0 / (dec_sum.decoder_d5_ns_x100 > 0u ? ((double)dec_sum.decoder_d5_ns_x100 / 100.0) : 1.0),
+            (double)dec_sum.lambda_d3_to_d5_x100 / 100.0);
+    fprintf(rp, "| `d = 7` | **`%.2f ns / round`** | %.1fx faster | **`Λ(5→7) = %.2fx`** |\n",
+            (double)dec_sum.decoder_d7_ns_x100 / 100.0,
+            1000.0 / (dec_sum.decoder_d7_ns_x100 > 0u ? ((double)dec_sum.decoder_d7_ns_x100 / 100.0) : 1.0),
+            (double)dec_sum.lambda_d5_to_d7_x100 / 100.0);
+
+    static const uint32_t kGenF2Q[2]   = {996000u, 998500u};
+    static const char    *kGenName[2]  = {
+        "Gen-1 Baseline Hardware (`F_2Q = 99.60%`, `T1 = 530 us`, `T2 = 300 us`)",
+        "Gen-2 Target Hardware (`F_2Q = 99.85%`, `T1 = 530 us`, `T2 = 300 us`)"
+    };
+
+    pqc_ftqc_design_t res_grid[2][8][4];
+    memset(res_grid, 0, sizeof(res_grid));
+
+    printf("\n=== Full-Stack FTQC Resource Co-Design (qctrl x qcc x Magic State Cultivation) ===\n");
+    for (uint32_t g = 0u; g < 2u; ++g) {
+        fprintf(rp, "\n## %u. %s\n\n", (unsigned)(g + 3u), kGenName[g]);
+        fprintf(rp, "| Benchmark | Controller | `ZZ` RMS | `p_eff` | SC Dist `d` | Magic State Scheme | Total Phys Q (Data+Magic) | Spacetime Reduction |\n");
+        fprintf(rp, "| :--- | :--- | ---: | ---: | ---: | :--- | ---: | ---: |\n");
+        printf("\n[%s]\n", kGenName[g]);
+
+        for (uint32_t a = 0u; a < n_apps; ++a) {
+            for (uint32_t c = 0u; c < 4u; ++c) {
+                pqc_hw_cal_profile_t pr = base_profs[c];
+                pr.f_2q_ppm = kGenF2Q[g];
+                pqc_ftqc_design_t des;
+                pqc_ftqc_codesign(&pr, apps[a].st.num_qubits, apps[a].t_eq, apps[a].t_depth, &des);
+                res_grid[g][a][c] = des;
+
+                char peff_buf[32], d_buf[16], scheme_buf[48], tot_q_buf[32], red_buf[24];
+                snprintf(peff_buf, sizeof(peff_buf), "%.2f%%", (double)des.p_eff_ppb / 1e7);
+                if (!des.below_sc_threshold) {
+                    snprintf(d_buf, sizeof(d_buf), "ABOVE_TH");
+                    snprintf(scheme_buf, sizeof(scheme_buf), "Blocked (`p_eff >= 1.0%%`)");
+                    snprintf(tot_q_buf, sizeof(tot_q_buf), "-");
+                    snprintf(red_buf, sizeof(red_buf), "-");
+                } else {
+                    snprintf(d_buf, sizeof(d_buf), "d=%u", (unsigned)des.d_data);
+                    if (des.cult_viable) {
+                        uint64_t tot_q = des.data_phys_qubits + des.cult_factory_qubits;
+                        snprintf(scheme_buf, sizeof(scheme_buf), "Cultivation (dc=%u, P=%u%%)",
+                                 (unsigned)des.cult_d, (unsigned)des.cult_p_surv_pct);
+                        snprintf(tot_q_buf, sizeof(tot_q_buf), "%llu (%llu+%llu)",
+                                 (unsigned long long)tot_q,
+                                 (unsigned long long)des.data_phys_qubits,
+                                 (unsigned long long)des.cult_factory_qubits);
+                        snprintf(red_buf, sizeof(red_buf), "**%.2fx**", (double)des.vol_reduction_q8 / 256.0);
+                    } else {
+                        uint64_t tot_q = des.data_phys_qubits + des.dist_factory_qubits;
+                        snprintf(scheme_buf, sizeof(scheme_buf), "15-to-1 Distill (cult eps too hi)");
+                        snprintf(tot_q_buf, sizeof(tot_q_buf), "%llu (%llu+%llu)",
+                                 (unsigned long long)tot_q,
+                                 (unsigned long long)des.data_phys_qubits,
+                                 (unsigned long long)des.dist_factory_qubits);
+                        snprintf(red_buf, sizeof(red_buf), "1.00x (baseline)");
+                    }
+                }
+                fprintf(rp, "| `%s` | `%s` | `%u mrad` | `%s` | `%s` | %s | %s | %s |\n",
+                        apps[a].name, pr.name, (unsigned)pr.patch_rms_mrad,
+                        peff_buf, d_buf, scheme_buf, tot_q_buf, red_buf);
+                if (c == 0u || c == 3u) {
+                    printf("  %-18s | %-28s | p_eff=%-6s | %-8s | %-30s | Q=%-18s | %s\n",
+                           apps[a].name, pr.name, peff_buf, d_buf, scheme_buf, tot_q_buf, red_buf);
+                }
+            }
+        }
+    }
+
+    /* Dynamically generated takeaways strictly consistent with evaluated table entries */
+    char cult_list[512] = "";
+    char fall_list[512] = "";
+    uint32_t n_cult = 0u, n_fall = 0u;
+    int qaoa_base_idx = -1, qaoa_opt_idx = -1;
+    for (uint32_t a = 0u; a < n_apps; ++a) {
+        if (strcmp(apps[a].name, "QAOA_MaxCut12_Base") == 0) qaoa_base_idx = (int)a;
+        if (strcmp(apps[a].name, "QAOA_MaxCut12_Opt") == 0)  qaoa_opt_idx  = (int)a;
+        const pqc_ftqc_design_t *d_r0 = &res_grid[1][a][3];
+        char item[96];
+        if (d_r0->below_sc_threshold && d_r0->cult_viable) {
+            snprintf(item, sizeof(item), "%s`%s` (`dc=%u`, **%.2fx**)",
+                     n_cult ? ", " : "", apps[a].name, (unsigned)d_r0->cult_d,
+                     (double)d_r0->vol_reduction_q8 / 256.0);
+            strncat(cult_list, item, sizeof(cult_list) - strlen(cult_list) - 1u);
+            n_cult++;
+        } else {
+            snprintf(item, sizeof(item), "%s`%s` (`%llu T-eq`, `d=%u`)",
+                     n_fall ? ", " : "", apps[a].name, (unsigned long long)apps[a].t_eq,
+                     (unsigned)d_r0->d_data);
+            strncat(fall_list, item, sizeof(fall_list) - strlen(fall_list) - 1u);
+            n_fall++;
+        }
+    }
+
+    fprintf(rp, "\n### Full-Stack Co-Design Takeaways (Auto-Derived from Measured Table)\n");
+    fprintf(rp, "- **Calibration gates Cultivation**: `No-Cal` (`%u mrad` `ZZ`) leaves `p_eff = %.2f%%` (Gen-1) / `%.2f%%` (Gen-2) above the `1.00%%` surface-code threshold (`ABOVE_TH`), blocking fault-tolerant scaling.\n",
+            (unsigned)base_profs[0].patch_rms_mrad,
+            (double)res_grid[0][0][0].p_eff_ppb / 1e7,
+            (double)res_grid[1][0][0].p_eff_ppb / 1e7);
+    fprintf(rp, "- **Ring-0 unlocks Cultivation where `T`-budget permits**: `FLOW-QCtrl Ring-0` (`%u mrad` `ZZ`) lowers Gen-2 `p_eff` to `%.2f%%`, unlocking Cultivation for **%u/%u** benchmarks (%s), while higher-budget workloads (%s) stay on `15-to-1` distillation.\n",
+            (unsigned)base_profs[3].patch_rms_mrad,
+            (double)res_grid[1][0][3].p_eff_ppb / 1e7,
+            n_cult, n_apps, n_cult ? cult_list : "none",
+            n_fall ? fall_list : "none");
+    if (qaoa_base_idx >= 0 && qaoa_opt_idx >= 0) {
+        uint64_t qb = res_grid[1][qaoa_base_idx][3].data_phys_qubits +
+                      (res_grid[1][qaoa_base_idx][3].cult_viable
+                           ? res_grid[1][qaoa_base_idx][3].cult_factory_qubits
+                           : res_grid[1][qaoa_base_idx][3].dist_factory_qubits);
+        uint64_t qo = res_grid[1][qaoa_opt_idx][3].data_phys_qubits +
+                      (res_grid[1][qaoa_opt_idx][3].cult_viable
+                           ? res_grid[1][qaoa_opt_idx][3].cult_factory_qubits
+                           : res_grid[1][qaoa_opt_idx][3].dist_factory_qubits);
+        fprintf(rp, "- **Compiler Popcount-LUT co-design payoff**: `QAOA_MaxCut12_Base -> QAOA_MaxCut12_Opt` cuts logical qubits `%u -> %u` and `CCX` `%llu -> %llu`, reducing Gen-2 Ring-0 physical footprint **`%llu -> %llu`** qubits.\n",
+                (unsigned)apps[qaoa_base_idx].st.num_qubits,
+                (unsigned)apps[qaoa_opt_idx].st.num_qubits,
+                (unsigned long long)apps[qaoa_base_idx].st.toffoli,
+                (unsigned long long)apps[qaoa_opt_idx].st.toffoli,
+                (unsigned long long)qb, (unsigned long long)qo);
+    }
+    fprintf(rp, "- **Sub-microsecond Ring-0 decoding**: Pure-GPR MWPM latency spans `%.2f ns` (`d=3`) to `%.2f ns` (`d=7`), staying well inside the `1,000 ns` surface-code cycle deadline with `Λ(5→7) = %.2fx` suppression.\n",
+            (double)dec_sum.decoder_d3_ns_x100 / 100.0,
+            (double)dec_sum.decoder_d7_ns_x100 / 100.0,
+            (double)dec_sum.lambda_d5_to_d7_x100 / 100.0);
+    fclose(rp);
+    printf("\nGenerated Full-Stack FTQC Co-Design Report -> %s\n", rep_path);
+
+    if (json_path) {
+        FILE *jf = fopen(json_path, "w");
+        if (!jf) {
+            fprintf(stderr, "[ftqc-suite] ERROR: cannot open JSON %s\n", json_path);
+            return 1;
+        }
+        fprintf(jf, "{\n  \"ring0_cal_sweep_ns\": %u,\n  \"decoder_d3_ns\": %.2f, \"decoder_d5_ns\": %.2f, \"decoder_d7_ns\": %.2f,\n",
+                (unsigned)dec_sum.ring0_cal_sweep_ns,
+                (double)dec_sum.decoder_d3_ns_x100 / 100.0,
+                (double)dec_sum.decoder_d5_ns_x100 / 100.0,
+                (double)dec_sum.decoder_d7_ns_x100 / 100.0);
+        fprintf(jf, "  \"lambda_d3_to_d5\": %.2f, \"lambda_d5_to_d7\": %.2f,\n  \"designs\": [\n",
+                (double)dec_sum.lambda_d3_to_d5_x100 / 100.0,
+                (double)dec_sum.lambda_d5_to_d7_x100 / 100.0);
+        bool first_j = true;
+        for (uint32_t g = 0u; g < 2u; ++g) {
+            for (uint32_t a = 0u; a < n_apps; ++a) {
+                for (uint32_t c = 0u; c < 4u; ++c) {
+                    const pqc_ftqc_design_t *d = &res_grid[g][a][c];
+                    uint64_t tot_q = d->below_sc_threshold
+                        ? (d->data_phys_qubits + (d->cult_viable ? d->cult_factory_qubits : d->dist_factory_qubits))
+                        : 0ULL;
+                    fprintf(jf,
+                            "%s    {\"gen\": %u, \"benchmark\": \"%s\", \"controller\": \"%s\", "
+                            "\"p_eff_ppb\": %llu, \"below_th\": %s, \"d_data\": %u, "
+                            "\"cult_viable\": %s, \"cult_d\": %u, \"total_phys_q\": %llu, \"spacetime_reduction\": %.2f}",
+                            first_j ? "" : ",\n",
+                            (unsigned)(g + 1u), apps[a].name, base_profs[c].name,
+                            (unsigned long long)d->p_eff_ppb, d->below_sc_threshold ? "true" : "false",
+                            (unsigned)d->d_data, d->cult_viable ? "true" : "false",
+                            (unsigned)d->cult_d, (unsigned long long)tot_q,
+                            (double)d->vol_reduction_q8 / 256.0);
+                    first_j = false;
+                }
+            }
+        }
+        fprintf(jf, "\n  ]\n}\n");
+        fclose(jf);
+        printf("Generated FTQC Co-Design JSON -> %s\n", json_path);
+    }
+    return 0;
+}
+
 static void print_usage(FILE *out) {
     fprintf(out,
-            "PQC — NIST Post-Quantum Cryptanalysis Resource Compiler (QCC v3)\n"
+            "PQC — NIST Post-Quantum Cryptanalysis & FTQC Co-Design Suite (QCC v3)\n"
             "Subcommands:\n"
             "  pqc selftest\n"
             "  pqc bench [out_dir] [--json <path>] [--md <path>]\n"
-            "  pqc analyze <circuit.kmb> --bits <k> [--name <label>]\n");
+            "  pqc analyze <circuit.kmb> --bits <k> [--name <label>]\n"
+            "  pqc ftqc-suite [--profile <qctrl.json>] [--qcc-dir <dir>] [--report <FTQC.md>] [--json <out.json>]\n");
 }
 
 int main(int argc, char **argv) {
@@ -1171,9 +1573,10 @@ int main(int argc, char **argv) {
         print_usage(stdout);
         return 0;
     }
-    if (strcmp(argv[1], "selftest") == 0) return cmd_selftest(argc, argv);
-    if (strcmp(argv[1], "bench") == 0)    return cmd_bench(argc, argv);
-    if (strcmp(argv[1], "analyze") == 0)  return cmd_analyze(argc, argv);
+    if (strcmp(argv[1], "selftest") == 0)   return cmd_selftest(argc, argv);
+    if (strcmp(argv[1], "bench") == 0)      return cmd_bench(argc, argv);
+    if (strcmp(argv[1], "analyze") == 0)    return cmd_analyze(argc, argv);
+    if (strcmp(argv[1], "ftqc-suite") == 0) return cmd_ftqc_suite(argc, argv);
     fprintf(stderr, "Unknown subcommand: %s\n", argv[1]);
     print_usage(stderr);
     return 2;

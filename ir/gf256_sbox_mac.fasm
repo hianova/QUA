@@ -1,0 +1,14 @@
+module gf256_sbox_mac
+mult linear
+flags 1
+input a 8
+input b 8
+input c 8
+input sel 1
+cst63:8 = CONST_U64 0x63
+inv_a:8 = GF2M_INV a 8 0x11b
+prod:8 = GF2M_MUL inv_a b 8 0x11b
+aff:8 = XOR_VEC prod cst63
+sum:8 = ADD c aff
+y:8 = CTRL_SEL sel prod sum
+output y

@@ -1,0 +1,9 @@
+module gf12_arith
+mult linear
+flags 1
+input a 12
+input b 12
+ainv:12 = GF2M_INV a 12 0x1053
+prod:12 = GF2M_MUL ainv b 12 0x1053
+res:12 = XOR_VEC prod a
+output res

@@ -1,6 +1,6 @@
 # `qcc` — QCC v3 通用容錯量子電路編譯器
 
-**QCC v3 (Quantum Circuit Compiler)** 是一套純 C17（且所有標頭皆相容 C++20 `-Wall -Wextra -Werror`）、零外部執行期依賴的容錯量子電路編譯器，建立於 `FLOW v8.0.0`（`core/` + `sdk/`）與 `SEARU` 之上（透過 `FLOW_DIR` 引用，無須複製標頭檔）。
+**QCC v3 (Quantum Circuit Compiler)** 是一套純 C17（且所有標頭皆相容 C++20 `-Wall -Wextra -Werror`）、零外部執行期依賴的容錯量子電路編譯器，建立於 `FLOW v10.0.0`（`core/` + `sdk/`）與 `SEARU` 之上（透過 `FLOW_DIR` 引用，無須複製標頭檔；預設透過原生 [`../ir/*.fasm`](../ir) + Z3 `QF_BV` 完成 Zero-Lean `LEAN=false` 建置）。
 
 ---
 
@@ -10,6 +10,7 @@
 | :--- | :--- |
 | [qcc_arena.h](qcc_arena.h) | 線性 Arena 配置器、256-bit 位元向量與 128-bit 固定點相位角度輔助運算（Clifford 階層判斷） |
 | [qcc_kmb.h](qcc_kmb.h) | Kickmix `.kmb` v2 二進位格式的雙向編解碼、遊標掃描、精確資源與關鍵路徑計數（`CCX`、`Z_POW`、`T_LIKE`、`HMR`、`D_react`、`D_toff`、`D_circ`）與暫存器管理 |
+| [qcc_qasm.h](qcc_qasm.h) | OpenQASM 3.0 雙向轉換匯出器（支援 Clifford/`T`/`rz`、`HMR` 與多層經典條件控制棧） |
 | [qir.h](qir.h) | SSA 量子中間表示（QIR）、64-lane 位元切片模擬器 `qir_eval_64`、zero-mask 抽象解釋與組建 API |
 | [qir_fir.h](qir_fir.h) | `FLOW.Morphism` `.fir` QTT 線性閘口橋接器（嚴格驗證 `.linear` 准入並降階至 QIR） |
 | [qir_lift.h](qir_lift.h) | 無尺度 `.kmb` v2 結構反編譯提升器（支援 `>256` qubit 分塊、Gidney temporary-AND、`LinF2` 與 `phase_poly` 島辨識） |
@@ -18,8 +19,9 @@
 | [qir_codegen.h](qir_codegen.h) | 物理暫存器配置、摺疊子圖降階、`@clean` 輔助暫存器輸出與 `.kmb` 閘序列發射 |
 | [qir_opt.h](qir_opt.h) | `SEARU` × `FLOW` 2-Jet 混合最佳化、$O(N \log N)$ 最大堆積零垃圾級聯反計算、in-place/線路借用排程（支援至 65,536 qubits 與大規模電路快速重寫播種） |
 | [qir_pass_kmb.h](qir_pass_kmb.h) | 閘級 `.kmb` 相位融合/自我反元素對消、`@clean` 裁剪壓縮，以及統一高階編譯 API（`qcc_compile_module_to_kmb` / `qcc_compile_module_to_file`） |
+| [qir_qaoa_mb.h](qir_qaoa_mb.h) | 宣告式 QAOA MaxCut-12（Base 與 4-bit Popcount-LUT Opt）、2D 4×4 Ising Trotter、4-body Plaquette LGT 與 12-var 3-SAT Grover Oracle 生成器 |
 | [qir_verify.h](qir_verify.h) | 雙種子 `.kmb` / QIR 等價與無相位回踢驗證器（支援經典輸入、分離式 `init_mask`/`cmp_mask` 遮罩與容許近似誤差驗證） |
-| [qcc_main.c](qcc_main.c) | CLI 工具（`opt` / `lift` / `verify` / `inspect` / `selftest`）與 `T1`–`T22` 自我測試套件（27 項測試） |
+| [qcc_main.c](qcc_main.c) | CLI 工具（`opt` / `verify` / `inspect` / `export-qasm` / `emit-bench` / `selftest`）與 `T1`–`T26` 自我測試套件 |
 
 ---
 
@@ -53,13 +55,12 @@
 
 ```bash
 cd qcc
-make FLOW_DIR=../../FLOW clean all test examples
+make FLOW_DIR=../../FLOW LEAN=false clean all test examples
 ```
 
 - `make check-headers` 會同時驗證 `cc -std=c17 -Wall -Wextra -Werror` 與 `c++ -std=c++20 -Wall -Wextra -Werror` 零警告編譯。
-- `make test` 執行 `./build/qcc selftest`，驗證全部 `T1`–`T22`（27 項）測試。
-- `make lean-fir examples` 從 [`Qua.lean`](../Qua.lean)（複用 `Flow.Canonical` 與 `Flow.Morphism.Builder`）編譯並以 `FLOW fir-synth` 合成與雙種子驗證全部 `.fir` 目標：
-  `gf256_sbox_mac.fir`、`rev_alu_fxp.fir`、`adder_csa_phase.fir`、`gf12_arith.fir`、`wide_lut_cap.fir`、`gf256_tower_spec.fir` $\to$ `gf256_tower_{a32,d4}.fir`（`CCX: 92 -> 32/33`, `T-depth: 88 -> 6`）、`lut5_bijection_spec.fir` $\to$ `lut5_bijection_opt.fir`（`CCX: 21 -> 5`, `T-depth: 13 -> 1`），並驗證拒斥 `.cartesian` 及與 `../ELE` 的 6 份跨專案 `.fir` 位元組一致性。
+- `make test` 執行 `./build/qcc selftest`，驗證全部 `T1`–`T26` 測試（含 QAOA MaxCut-12、Popcount-LUT、Ising 4×4、Plaquette LGT、3-SAT Oracle 與 OpenQASM 3.0 匯出檢查）。
+- `make LEAN=false fir-artifacts examples` 從 `../ir/*.fasm` + `FLOW fir-synth` + Z3 `QF_BV` miter 合成與驗證全部 `.fir` 目標並執行 `emit-bench`；執行 `make lean-fir` 則額外對照 [`Qua.lean`](../Qua.lean) 7/7 `.fir` 位元組完全一致性、拒斥 `.cartesian` 及與 `../ELE` 的 6 份跨專案同源 SSOT。
 
 ### CLI 指令
 
@@ -68,6 +69,8 @@ make FLOW_DIR=../../FLOW clean all test examples
 ./build/qcc opt <in.kmb|in.fir> -o <out.kmb> [--max-q N] [--metric default|qc|q2t|qt] [--iters N] [--verify-batches N] [--clean-anc] [--emit-clean-reg]
 ./build/qcc verify <circuit.kmb> [--ref <ref.kmb|ref.fir>] [--states N] [--in-regs N]
 ./build/qcc inspect <circuit.kmb>
+./build/qcc export-qasm <in.kmb> -o <out.qasm>
+./build/qcc emit-bench <out_dir>
 ./build/qcc selftest
 ```
 
