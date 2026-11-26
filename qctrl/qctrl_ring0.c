@@ -1,6 +1,7 @@
 #define QCTRL_EXPORT_RING0 1
 #include "qctrl_ring0.h"
 #include "qctrl_decoder_ring0.h"
+#include "qctrl_decoder3d_ring0.h"
 
 bool qctrl_edge_step_ring0_export(qctrl_edge_state_t *st, const qctrl_cfg_t *cfg, int32_t km,
                                   int32_t k0, int32_t kp, int32_t n_shots) {
@@ -36,4 +37,14 @@ uint64_t qctrl_sc_decode_ring0_export(const qctrl_sc_code_t *code, uint32_t synd
 bool qctrl_synd_monitor_step_ring0_export(qctrl_synd_monitor_t *mon, uint32_t synd_x,
                                           uint32_t synd_z, uint32_t n_stab_per_type) {
     return qctrl_synd_monitor_step_ring0(mon, synd_x, synd_z, n_stab_per_type);
+}
+
+void qctrl_sc_detectors3d_ring0_export(const uint32_t *meas_synd, uint32_t n_slices,
+                                       uint32_t *out_det) {
+    qctrl_sc_detectors3d_ring0(meas_synd, n_slices, out_det);
+}
+
+uint64_t qctrl_sc_decode3d_ring0_export(const qctrl_sc_code_t *code, const uint32_t *det,
+                                        uint32_t n_slices, bool is_z_err) {
+    return qctrl_sc_decode3d_ring0(code, det, n_slices, is_z_err);
 }

@@ -1535,19 +1535,35 @@ static int cmd_selftest(void) {
         qir_module_t m; qir_module_init(&m, &ar, "t23c_qaoa_maxcut12_opt");
         qcc_opt_cfg_t cfg = qcc_opt_cfg_default();
         cfg.require_clean_scratch = true;
-        qcc_kmb_stats_t st;
+        qcc_kmb_stats_t st23c;
+        memset(&st23c, 0, sizeof(st23c));
         if (!qir_build_qaoa_maxcut_opt_qir(&m, 12u, kMaxCut12Edges, 18u) ||
             (qir_recompute_zero_masks(&m), false) ||
-            !test_compile_and_verify("T23c_QAOA_MaxCut12_PopLUT_Opt", &m, &ar, &cfg, 16u, false, false, false, 0u, &st) ||
-            st.toffoli == 0u || st.z_pow == 0u ||
-            st.num_qubits >= st23a.num_qubits || st.toffoli >= st23a.toffoli) {
+            !test_compile_and_verify("T23c_QAOA_MaxCut12_PopLUT_Opt", &m, &ar, &cfg, 16u, false, false, false, 0u, &st23c) ||
+            st23c.toffoli == 0u || st23c.z_pow == 0u ||
+            st23c.num_qubits >= st23a.num_qubits || st23c.toffoli >= st23a.toffoli) {
             printf("  FAIL [T23c expected Q<%u CCX<%llu, got Q=%u CCX=%llu]\n",
                    (unsigned)st23a.num_qubits, (unsigned long long)st23a.toffoli,
-                   (unsigned)st.num_qubits, (unsigned long long)st.toffoli);
+                   (unsigned)st23c.num_qubits, (unsigned long long)st23c.toffoli);
             fails++;
         }
         qir_module_free(&m);
         qcc_arena_free(&ar);
+
+        qcc_arena_t ar_w; qcc_arena_init(&ar_w, 1024u * 1024u);
+        qir_module_t m_w; qir_module_init(&m_w, &ar_w, "t23d_qaoa_maxcut12_wallace");
+        qcc_kmb_stats_t st_w;
+        memset(&st_w, 0, sizeof(st_w));
+        if (!qir_build_qaoa_maxcut_wallace_qir(&m_w, 12u, kMaxCut12Edges, 18u) ||
+            (qir_recompute_zero_masks(&m_w), false) ||
+            !test_compile_and_verify("T23d_QAOA_MaxCut12_Wallace_Opt", &m_w, &ar_w, &cfg, 16u, false, false, false, 0u, &st_w) ||
+            st_w.toffoli == 0u || st_w.toffoli > 24u || st_w.num_qubits >= st23a.num_qubits) {
+            printf("  FAIL [T23d expected Q<%u CCX<=24, got Q=%u CCX=%llu]\n",
+                   (unsigned)st23a.num_qubits, (unsigned)st_w.num_qubits, (unsigned long long)st_w.toffoli);
+            fails++;
+        }
+        qir_module_free(&m_w);
+        qcc_arena_free(&ar_w);
     }
     {
         qcc_arena_t ar; qcc_arena_init(&ar, 1024u * 1024u);
@@ -1666,20 +1682,21 @@ static int cmd_emit_bench(int argc, char **argv) {
         { 1, -2,  3}, {-1,  4,  5}, { 2, -4,  6}, {-3,  5, -7},
         { 6,  7, -8}, { 8, -9, 10}, {-10, 11, 12}, {-11, 12, 1}
     };
-    const char *names[5] = {
-        "qaoa_maxcut12", "qaoa_maxcut12_opt", "ising4x4_trotter",
-        "plaquette4x4_lgt", "ksat12_grover"
+    const char *names[6] = {
+        "qaoa_maxcut12", "qaoa_maxcut12_opt", "qaoa_maxcut12_wallace",
+        "ising4x4_trotter", "plaquette4x4_lgt", "ksat12_grover"
     };
     int rc = 0;
 
-    for (int bi = 0; bi < 5; ++bi) {
+    for (int bi = 0; bi < 6; ++bi) {
         qcc_arena_t ar; qcc_arena_init(&ar, 2048u * 1024u);
         qir_module_t m; qir_module_init(&m, &ar, names[bi]);
         bool ok = false;
         if (bi == 0)      ok = qir_build_qaoa_maxcut_qir(&m, 12u, kMaxCut12Edges, 18u);
         else if (bi == 1) ok = qir_build_qaoa_maxcut_opt_qir(&m, 12u, kMaxCut12Edges, 18u);
-        else if (bi == 2) ok = qir_build_ising_trotter_qir(&m, 4u, 4u);
-        else if (bi == 3) ok = qir_build_plaquette_lgt_qir(&m, 4u, 4u);
+        else if (bi == 2) ok = qir_build_qaoa_maxcut_wallace_qir(&m, 12u, kMaxCut12Edges, 18u);
+        else if (bi == 3) ok = qir_build_ising_trotter_qir(&m, 4u, 4u);
+        else if (bi == 4) ok = qir_build_plaquette_lgt_qir(&m, 4u, 4u);
         else              ok = qir_build_ksat_oracle_qir(&m, 12u, kSat12Clauses, 8u);
         if (!ok) { rc = 1; qir_module_free(&m); qcc_arena_free(&ar); continue; }
         qir_recompute_zero_masks(&m);

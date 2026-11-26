@@ -21,7 +21,7 @@ all: $(TARGET) ring0 check-headers
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(RING0_O): qctrl_ring0.c qctrl_ring0.h qctrl_decoder_ring0.h $(FLOW_DIR)/core/flow.h $(FLOW_DIR)/core/flow_opt_params.h | $(BUILD)
+$(RING0_O): qctrl_ring0.c qctrl_ring0.h qctrl_decoder_ring0.h qctrl_decoder3d_ring0.h $(FLOW_DIR)/core/flow.h $(FLOW_DIR)/core/flow_opt_params.h | $(BUILD)
 	$(CC) $(RING0_CF) -c qctrl_ring0.c -o $@
 
 ring0: $(RING0_O)
@@ -34,11 +34,11 @@ ring0: $(RING0_O)
 	@echo "  [PASS] $(RING0_O): zero undefined symbols, zero udiv/sdiv/blr, zero FPU/SIMD"
 
 check-headers:
-	$(CC) -std=c17 -Wall -Wextra -Werror -Wno-unused-function -I$(FLOW_DIR)/core -I. -fsyntax-only qctrl_ring0.h qctrl_breakeven.h qctrl_decoder_ring0.h
-	$(CXX) -std=c++20 -Wall -Wextra -Werror -Wno-unused-function -iquote $(FLOW_DIR)/core -iquote . -x c++-header -fsyntax-only qctrl_ring0.h qctrl_breakeven.h qctrl_decoder_ring0.h
-	@echo "  [PASS] qctrl_ring0.h + qctrl_breakeven.h + qctrl_decoder_ring0.h clean under C17 + C++20 -Wall -Wextra -Werror"
+	$(CC) -std=c17 -Wall -Wextra -Werror -Wno-unused-function -I$(FLOW_DIR)/core -I. -fsyntax-only qctrl_ring0.h qctrl_breakeven.h qctrl_decoder_ring0.h qctrl_decoder3d_ring0.h
+	$(CXX) -std=c++20 -Wall -Wextra -Werror -Wno-unused-function -iquote $(FLOW_DIR)/core -iquote . -x c++-header -fsyntax-only qctrl_ring0.h qctrl_breakeven.h qctrl_decoder_ring0.h qctrl_decoder3d_ring0.h
+	@echo "  [PASS] qctrl_ring0.h + qctrl_breakeven.h + qctrl_decoder_ring0.h + qctrl_decoder3d_ring0.h clean under C17 + C++20"
 
-$(TARGET): qctrl_sim40.c qctrl_ring0.h qctrl_breakeven.h qctrl_decoder_ring0.h $(FLOW_DIR)/core/flow.h $(FLOW_DIR)/core/flow_opt_params.h | $(BUILD)
+$(TARGET): qctrl_sim40.c qctrl_ring0.h qctrl_breakeven.h qctrl_decoder_ring0.h qctrl_decoder3d_ring0.h $(FLOW_DIR)/core/flow.h $(FLOW_DIR)/core/flow_opt_params.h | $(BUILD)
 	$(CC) $(CFLAGS) qctrl_sim40.c -lm -o $@
 
 test: $(TARGET) ring0 check-headers
@@ -48,6 +48,7 @@ demo: test
 	./$(TARGET) bench40 --out $(BUILD)/bench40.json
 	./$(TARGET) breakeven --in $(BUILD)/bench40.json --report DEMO_REPORT.md --ftqc-out $(BUILD)/qctrl_ftqc_profile.json
 	./$(TARGET) decode-bench --profile-in $(BUILD)/qctrl_ftqc_profile.json --profile-out $(BUILD)/qctrl_ftqc_profile.json --report DEMO_REPORT.md
+	./$(TARGET) decode3d-bench --profile-in $(BUILD)/qctrl_ftqc_profile.json --profile-out $(BUILD)/qctrl_ftqc_profile.json --report DEMO_REPORT.md
 
 clean:
 	rm -rf $(BUILD)

@@ -11,6 +11,7 @@
 #include "qctrl_ring0.h"
 #include "qctrl_breakeven.h"
 #include "qctrl_decoder_ring0.h"
+#include "qctrl_decoder3d_ring0.h"
 
 /* ============================================================================
  * Fast Deterministic PRNG (xoshiro256**) & Exact Binomial Sampler
@@ -337,6 +338,101 @@ static int run_selftest(void) {
                (unsigned long long)total_exh_cases);
         printf("[SELF-CHECK PASS] Ring-0 Syndrome Drift Monitor: 0/200 quiet false alarms, burst caught in %d rounds\n",
                detected_at + 1);
+    }
+
+    /* 3D Space-Time Noisy-Measurement Fault Tolerance Self-Test (d=3, 5 exhaustive wt<=t + d=7 5000 wt-3) */
+    {
+        static const uint32_t kDists3D[3] = {3U, 5U, 7U};
+        uint64_t total_3d_cases = 0ULL;
+        for (int di = 0; di < 3; ++di) {
+            uint32_t d = kDists3D[di];
+            uint32_t n_slices = d + 1U;
+            qctrl_sc_code_t code;
+            qctrl_sc_init_ring0(&code, d);
+            uint32_t n_sites_per_round = code.n_data + code.n_stab;
+            uint32_t n_sites = d * n_sites_per_round;
+
+            for (int is_z = 0; is_z <= 1; ++is_z) {
+                uint64_t l_obs = is_z ? code.log_x_mask : code.log_z_mask;
+                for (uint32_t a = 0U; a < n_sites; ++a) {
+                    uint64_t ed[8] = {0}, cum = 0ULL;
+                    uint32_t em[8] = {0}, ms[8] = {0}, det[8] = {0};
+                    uint32_t ra = a / n_sites_per_round, oa = a % n_sites_per_round;
+                    if (oa < code.n_data) ed[ra] ^= (UINT64_C(1) << oa);
+                    else                  em[ra] ^= (UINT32_C(1) << (oa - code.n_data));
+                    for (uint32_t t = 0U; t < n_slices; ++t) {
+                        if (t < d) cum ^= ed[t];
+                        ms[t] = qctrl_sc_syndrome_ring0(&code, cum, is_z != 0) ^ ((t < d) ? em[t] : 0U);
+                    }
+                    qctrl_sc_detectors3d_ring0(ms, n_slices, det);
+                    uint64_t corr = qctrl_sc_decode3d_ring0(&code, det, n_slices, is_z != 0);
+                    uint64_t res  = cum ^ corr;
+                    if (qctrl_sc_syndrome_ring0(&code, res, is_z != 0) != 0U ||
+                        (qctrl__popcnt64_gpr(res & l_obs) & 1U) != 0U) {
+                        fprintf(stderr, "SELFTEST FAIL: 3D d=%u is_z=%d wt-1 site=%u failed!\n", d, is_z, a);
+                        return 1;
+                    }
+                    total_3d_cases += 1ULL;
+
+                    if (d == 5U) {
+                        for (uint32_t b = a + 1U; b < n_sites; ++b) {
+                            uint64_t ed2[8], cum2 = 0ULL;
+                            uint32_t em2[8], ms2[8], det2[8];
+                            memcpy(ed2, ed, sizeof(ed2));
+                            memcpy(em2, em, sizeof(em2));
+                            uint32_t rb = b / n_sites_per_round, ob = b % n_sites_per_round;
+                            if (ob < code.n_data) ed2[rb] ^= (UINT64_C(1) << ob);
+                            else                  em2[rb] ^= (UINT32_C(1) << (ob - code.n_data));
+                            for (uint32_t t = 0U; t < n_slices; ++t) {
+                                if (t < d) cum2 ^= ed2[t];
+                                ms2[t] = qctrl_sc_syndrome_ring0(&code, cum2, is_z != 0) ^ ((t < d) ? em2[t] : 0U);
+                            }
+                            qctrl_sc_detectors3d_ring0(ms2, n_slices, det2);
+                            uint64_t corr2 = qctrl_sc_decode3d_ring0(&code, det2, n_slices, is_z != 0);
+                            uint64_t res2  = cum2 ^ corr2;
+                            if (qctrl_sc_syndrome_ring0(&code, res2, is_z != 0) != 0U ||
+                                (qctrl__popcnt64_gpr(res2 & l_obs) & 1U) != 0U) {
+                                fprintf(stderr, "SELFTEST FAIL: 3D d=5 is_z=%d wt-2 (%u,%u) failed!\n", is_z, a, b);
+                                return 1;
+                            }
+                            total_3d_cases += 1ULL;
+                        }
+                    }
+                }
+            }
+
+            if (d == 7U) {
+                rng_t r3d;
+                rng_seed(&r3d, UINT64_C(0x3D7772026));
+                for (uint32_t s = 0U; s < 5000U; ++s) {
+                    int is_z = (int)(s & 1U);
+                    uint64_t l_obs = is_z ? code.log_x_mask : code.log_z_mask;
+                    uint64_t ed3[8] = {0}, cum3 = 0ULL;
+                    uint32_t em3[8] = {0}, ms3[8] = {0}, det3[8] = {0};
+                    for (int w = 0; w < 3; ++w) {
+                        uint32_t site = (uint32_t)(rng_next(&r3d) % (uint64_t)n_sites);
+                        uint32_t rt = site / n_sites_per_round, ot = site % n_sites_per_round;
+                        if (ot < code.n_data) ed3[rt] ^= (UINT64_C(1) << ot);
+                        else                  em3[rt] ^= (UINT32_C(1) << (ot - code.n_data));
+                    }
+                    for (uint32_t t = 0U; t < n_slices; ++t) {
+                        if (t < d) cum3 ^= ed3[t];
+                        ms3[t] = qctrl_sc_syndrome_ring0(&code, cum3, is_z != 0) ^ ((t < d) ? em3[t] : 0U);
+                    }
+                    qctrl_sc_detectors3d_ring0(ms3, n_slices, det3);
+                    uint64_t corr3 = qctrl_sc_decode3d_ring0(&code, det3, n_slices, is_z != 0);
+                    uint64_t res3  = cum3 ^ corr3;
+                    if (qctrl_sc_syndrome_ring0(&code, res3, is_z != 0) != 0U ||
+                        (qctrl__popcnt64_gpr(res3 & l_obs) & 1U) != 0U) {
+                        fprintf(stderr, "SELFTEST FAIL: 3D d=7 wt-3 sample %u failed!\n", s);
+                        return 1;
+                    }
+                    total_3d_cases += 1ULL;
+                }
+            }
+        }
+        printf("[SELF-CHECK PASS] Ring-0 3D Space-Time (d=3,5,7): %llu data+meas wt<=t patterns 0 errors\n",
+               (unsigned long long)total_3d_cases);
     }
     return 0;
 }
@@ -848,6 +944,207 @@ static int run_decode_bench(const char *prof_in, const char *prof_out, const cha
     return 0;
 }
 
+static int run_decode3d_bench(const char *prof_in, const char *prof_out, const char *report_path) {
+    static const uint32_t kDists[3] = {3U, 5U, 7U};
+    static const double kPs[5]      = {0.002, 0.004, 0.006, 0.010, 0.015};
+    const uint32_t lat_blocks       = 20000U;
+    const uint32_t mc_blocks        = 20000U;
+
+    qctrl_sc_code_t codes[3];
+    double lat_ns_block[3] = {0.0, 0.0, 0.0};
+    double lat_ns_round[3] = {0.0, 0.0, 0.0};
+    double eps_l[3][5];
+    memset(eps_l, 0, sizeof(eps_l));
+
+    rng_t rng;
+    rng_seed(&rng, UINT64_C(0x3D20261126));
+
+    uint32_t *detx_buf = (uint32_t *)malloc((size_t)lat_blocks * 8U * sizeof(uint32_t));
+    uint32_t *detz_buf = (uint32_t *)malloc((size_t)lat_blocks * 8U * sizeof(uint32_t));
+    if (!detx_buf || !detz_buf) {
+        free(detx_buf);
+        free(detz_buf);
+        return 1;
+    }
+
+    for (int di = 0; di < 3; ++di) {
+        uint32_t d = kDists[di];
+        uint32_t n_slices = d + 1U;
+        qctrl_sc_init_ring0(&codes[di], d);
+        uint32_t n_q = codes[di].n_data;
+        uint32_t n_s = codes[di].n_stab;
+        uint64_t thresh = (uint64_t)(0.003 * 18446744073709551616.0);
+
+        for (uint32_t b = 0U; b < lat_blocks; ++b) {
+            uint64_t cx = 0ULL, cz = 0ULL;
+            uint32_t msx[8], msz[8];
+            for (uint32_t t = 0U; t < n_slices; ++t) {
+                uint32_t mx = 0U, mz = 0U;
+                if (t < d) {
+                    for (uint32_t q = 0U; q < n_q; ++q) {
+                        if (rng_next(&rng) < thresh) cx ^= (UINT64_C(1) << q);
+                        if (rng_next(&rng) < thresh) cz ^= (UINT64_C(1) << q);
+                    }
+                    for (uint32_t s = 0U; s < n_s; ++s) {
+                        if (rng_next(&rng) < thresh) mx |= (UINT32_C(1) << s);
+                        if (rng_next(&rng) < thresh) mz |= (UINT32_C(1) << s);
+                    }
+                }
+                msx[t] = qctrl_sc_syndrome_ring0(&codes[di], cx, false) ^ mx;
+                msz[t] = qctrl_sc_syndrome_ring0(&codes[di], cz, true) ^ mz;
+            }
+            qctrl_sc_detectors3d_ring0(msx, n_slices, &detx_buf[b * 8U]);
+            qctrl_sc_detectors3d_ring0(msz, n_slices, &detz_buf[b * 8U]);
+        }
+
+        struct timespec t0, t1;
+        volatile uint64_t sink = 0ULL;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (uint32_t b = 0U; b < lat_blocks; ++b) {
+            uint64_t rcx = qctrl_sc_decode3d_ring0(&codes[di], &detx_buf[b * 8U], n_slices, false);
+            uint64_t rcz = qctrl_sc_decode3d_ring0(&codes[di], &detz_buf[b * 8U], n_slices, true);
+            sink ^= (rcx ^ rcz);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        (void)sink;
+        double el_ns     = ((double)(t1.tv_sec - t0.tv_sec) * 1e9) + (double)(t1.tv_nsec - t0.tv_nsec);
+        lat_ns_block[di] = el_ns / (double)lat_blocks;
+        lat_ns_round[di] = lat_ns_block[di] / (double)d;
+
+        for (int pi = 0; pi < 5; ++pi) {
+            uint64_t p_th = (uint64_t)(kPs[pi] * 18446744073709551616.0);
+            uint64_t fails = 0ULL;
+            for (uint32_t b = 0U; b < mc_blocks; ++b) {
+                uint64_t cx = 0ULL, cz = 0ULL;
+                uint32_t msx[8], msz[8], detx[8], detz[8];
+                for (uint32_t t = 0U; t < n_slices; ++t) {
+                    uint32_t mx = 0U, mz = 0U;
+                    if (t < d) {
+                        for (uint32_t q = 0U; q < n_q; ++q) {
+                            if (rng_next(&rng) < p_th) cx ^= (UINT64_C(1) << q);
+                            if (rng_next(&rng) < p_th) cz ^= (UINT64_C(1) << q);
+                        }
+                        for (uint32_t s = 0U; s < n_s; ++s) {
+                            if (rng_next(&rng) < p_th) mx |= (UINT32_C(1) << s);
+                            if (rng_next(&rng) < p_th) mz |= (UINT32_C(1) << s);
+                        }
+                    }
+                    msx[t] = qctrl_sc_syndrome_ring0(&codes[di], cx, false) ^ mx;
+                    msz[t] = qctrl_sc_syndrome_ring0(&codes[di], cz, true) ^ mz;
+                }
+                qctrl_sc_detectors3d_ring0(msx, n_slices, detx);
+                qctrl_sc_detectors3d_ring0(msz, n_slices, detz);
+                uint64_t rx = cx ^ qctrl_sc_decode3d_ring0(&codes[di], detx, n_slices, false);
+                uint64_t rz = cz ^ qctrl_sc_decode3d_ring0(&codes[di], detz, n_slices, true);
+                bool l_fail = ((qctrl__popcnt64_gpr(rx & codes[di].log_z_mask) & 1U) != 0U) ||
+                              ((qctrl__popcnt64_gpr(rz & codes[di].log_x_mask) & 1U) != 0U);
+                if (l_fail) {
+                    fails += 1ULL;
+                }
+            }
+            eps_l[di][pi] = (double)fails / (double)mc_blocks;
+        }
+    }
+    free(detx_buf);
+    free(detz_buf);
+
+    int ref_pi = 2; /* p=0.006 (below 3D phenomenological threshold) */
+    if (eps_l[2][ref_pi] <= 0.0) ref_pi = 3; /* p=0.010 */
+    double lam35 = (eps_l[1][ref_pi] > 0.0) ? (eps_l[0][ref_pi] / eps_l[1][ref_pi]) : 1.0;
+    double lam57 = (eps_l[2][ref_pi] > 0.0) ? (eps_l[1][ref_pi] / eps_l[2][ref_pi]) : 1.0;
+
+    printf("\n=== Ring-0 Pure-GPR 3D Space-Time Decoder Benchmark (d rounds + ideal final, 20k blocks/pt) ===\n");
+    printf("Latency @ p_d=p_m=0.003: d=3 %.1f ns/blk (%.1f ns/rnd) | d=5 %.1f ns/blk (%.1f ns/rnd) | d=7 %.1f ns/blk (%.1f ns/rnd)\n",
+           lat_ns_block[0], lat_ns_round[0], lat_ns_block[1], lat_ns_round[1], lat_ns_block[2], lat_ns_round[2]);
+    printf("3D Suppression @ p=%.3f: Lambda_3D(3->5) = %.2fx | Lambda_3D(5->7) = %.2fx\n",
+           kPs[ref_pi], lam35, lam57);
+    printf("   p_d=p_m | eps_L (d=3) | eps_L (d=5) | eps_L (d=7)\n");
+    for (int pi = 0; pi < 5; ++pi) {
+        printf("    %.3f  |  %.3e  |  %.3e  |  %.3e\n",
+               kPs[pi], eps_l[0][pi], eps_l[1][pi], eps_l[2][pi]);
+    }
+
+    if (prof_in && prof_out) {
+        FILE *fp = fopen(prof_in, "rb");
+        if (fp) {
+            fseek(fp, 0, SEEK_END);
+            long sz = ftell(fp);
+            rewind(fp);
+            char *buf = (sz > 0 && sz < 262144L) ? (char *)malloc((size_t)sz + 1u) : NULL;
+            if (buf) {
+                size_t nr = fread(buf, 1u, (size_t)sz, fp);
+                fclose(fp);
+                buf[nr] = '\0';
+                char *old_dec = strstr(buf, ",\n  \"decoder3d_d3_ns_per_round\"");
+                char *close_b = old_dec ? old_dec : strrchr(buf, '}');
+                if (close_b) {
+                    *close_b = '\0';
+                    FILE *wp = fopen(prof_out, "w");
+                    if (wp) {
+                        fprintf(wp, "%s,\n", buf);
+                        fprintf(wp, "  \"decoder3d_d3_ns_per_round\": %.2f,\n", lat_ns_round[0]);
+                        fprintf(wp, "  \"decoder3d_d5_ns_per_round\": %.2f,\n", lat_ns_round[1]);
+                        fprintf(wp, "  \"decoder3d_d7_ns_per_round\": %.2f,\n", lat_ns_round[2]);
+                        fprintf(wp, "  \"lambda3d_d3_to_d5\": %.2f,\n", lam35);
+                        fprintf(wp, "  \"lambda3d_d5_to_d7\": %.2f\n}\n", lam57);
+                        fclose(wp);
+                        printf("Updated FTQC profile with 3D Ring-0 decoder metrics -> %s\n", prof_out);
+                    }
+                }
+                free(buf);
+            } else {
+                fclose(fp);
+            }
+        }
+    }
+
+    if (report_path) {
+        FILE *fp = fopen(report_path, "rb");
+        char *orig = NULL;
+        size_t orig_len = 0u;
+        if (fp) {
+            fseek(fp, 0, SEEK_END);
+            long sz = ftell(fp);
+            rewind(fp);
+            if (sz > 0 && sz < 1048576L) {
+                orig = (char *)malloc((size_t)sz + 1u);
+                if (orig) {
+                    orig_len = fread(orig, 1u, (size_t)sz, fp);
+                    orig[orig_len] = '\0';
+                    char *sec6 = strstr(orig, "\n## 六、");
+                    if (sec6) *sec6 = '\0';
+                }
+            }
+            fclose(fp);
+        }
+        FILE *rp = fopen(report_path, "w");
+        if (rp) {
+            if (orig) {
+                fprintf(rp, "%s\n", orig);
+                free(orig);
+            }
+            fprintf(rp, "## 六、Ring-0 3D 時空容錯解碼器（`d` 輪含測錯之純 GPR 3D MWPM）\n\n");
+            fprintf(rp, "- **Phenomenological 3D 解碼延遲**（`d` 輪連續雜訊量測＋1 輪最終讀出，`p_data = p_meas = 0.003`）：\n");
+            fprintf(rp, "  - **`d = 3`（4 切片）**：**`%.1f ns / block`（`%.1f ns / round`）**\n", lat_ns_block[0], lat_ns_round[0]);
+            fprintf(rp, "  - **`d = 5`（6 切片）**：**`%.1f ns / block`（`%.1f ns / round`）**\n", lat_ns_block[1], lat_ns_round[1]);
+            fprintf(rp, "  - **`d = 7`（8 切片）**：**`%.1f ns / block`（`%.1f ns / round`）**\n", lat_ns_block[2], lat_ns_round[2]);
+            fprintf(rp, "- **3D 指數抑錯因子 (`p_d = p_m = %.3f`)**：`Λ_3D(d=3→5) = %.2f×`、`Λ_3D(d=5→7) = %.2f×`\n\n",
+                    kPs[ref_pi], lam35, lam57);
+            fprintf(rp, "| 時空誤差 `p_data = p_meas` | `d = 3` 3D 邏輯錯誤率 | `d = 5` 3D 邏輯錯誤率 | `d = 7` 3D 邏輯錯誤率 |\n");
+            fprintf(rp, "| :---: | :---: | :---: | :---: |\n");
+            for (int pi = 0; pi < 5; ++pi) {
+                fprintf(rp, "| `%.3f` | `%.3e` | `%.3e` | `%.3e` |\n",
+                        kPs[pi], eps_l[0][pi], eps_l[1][pi], eps_l[2][pi]);
+            }
+            fclose(rp);
+            printf("Appended 3D Ring-0 Decoder section -> %s\n", report_path);
+        } else if (orig) {
+            free(orig);
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr,
@@ -896,6 +1193,17 @@ int main(int argc, char **argv) {
             else if (strcmp(argv[i], "--report") == 0) rep = argv[++i];
         }
         return run_decode_bench(pin, pout, rep);
+    }
+    if (strcmp(argv[1], "decode3d-bench") == 0) {
+        const char *pin  = NULL;
+        const char *pout = NULL;
+        const char *rep  = NULL;
+        for (int i = 2; i + 1 < argc; ++i) {
+            if (strcmp(argv[i], "--profile-in") == 0) pin = argv[++i];
+            else if (strcmp(argv[i], "--profile-out") == 0) pout = argv[++i];
+            else if (strcmp(argv[i], "--report") == 0) rep = argv[++i];
+        }
+        return run_decode3d_bench(pin, pout, rep);
     }
     fprintf(stderr, "Unknown command: %s\n", argv[1]);
     return 1;

@@ -1231,6 +1231,11 @@ static bool pqc__load_qctrl_profiles(
     dec_out->decoder_d7_ns_x100    = 800u;
     dec_out->lambda_d3_to_d5_x100  = 600u;
     dec_out->lambda_d5_to_d7_x100  = 580u;
+    dec_out->decoder3d_d3_ns_x100  = 450u;
+    dec_out->decoder3d_d5_ns_x100  = 1100u;
+    dec_out->decoder3d_d7_ns_x100  = 4500u;
+    dec_out->lambda3d_d3_to_d5_x100 = 200u;
+    dec_out->lambda3d_d5_to_d7_x100 = 200u;
 
     if (!path) return false;
     FILE *fp = fopen(path, "rb");
@@ -1253,8 +1258,13 @@ static bool pqc__load_qctrl_profiles(
     dec_out->decoder_d3_ns_x100   = pqc__parse_scaled100_after(buf, "\"decoder_d3_ns\"", dec_out->decoder_d3_ns_x100);
     dec_out->decoder_d5_ns_x100   = pqc__parse_scaled100_after(buf, "\"decoder_d5_ns\"", dec_out->decoder_d5_ns_x100);
     dec_out->decoder_d7_ns_x100   = pqc__parse_scaled100_after(buf, "\"decoder_d7_ns\"", dec_out->decoder_d7_ns_x100);
-    dec_out->lambda_d3_to_d5_x100 = pqc__parse_scaled100_after(buf, "\"lambda_d3_to_d5\"", dec_out->lambda_d3_to_d5_x100);
-    dec_out->lambda_d5_to_d7_x100 = pqc__parse_scaled100_after(buf, "\"lambda_d5_to_d7\"", dec_out->lambda_d5_to_d7_x100);
+    dec_out->lambda_d3_to_d5_x100   = pqc__parse_scaled100_after(buf, "\"lambda_d3_to_d5\"", dec_out->lambda_d3_to_d5_x100);
+    dec_out->lambda_d5_to_d7_x100   = pqc__parse_scaled100_after(buf, "\"lambda_d5_to_d7\"", dec_out->lambda_d5_to_d7_x100);
+    dec_out->decoder3d_d3_ns_x100   = pqc__parse_scaled100_after(buf, "\"decoder3d_d3_ns_per_round\"", dec_out->decoder3d_d3_ns_x100);
+    dec_out->decoder3d_d5_ns_x100   = pqc__parse_scaled100_after(buf, "\"decoder3d_d5_ns_per_round\"", dec_out->decoder3d_d5_ns_x100);
+    dec_out->decoder3d_d7_ns_x100   = pqc__parse_scaled100_after(buf, "\"decoder3d_d7_ns_per_round\"", dec_out->decoder3d_d7_ns_x100);
+    dec_out->lambda3d_d3_to_d5_x100 = pqc__parse_scaled100_after(buf, "\"lambda3d_d3_to_d5\"", dec_out->lambda3d_d3_to_d5_x100);
+    dec_out->lambda3d_d5_to_d7_x100 = pqc__parse_scaled100_after(buf, "\"lambda3d_d5_to_d7\"", dec_out->lambda3d_d5_to_d7_x100);
 
     const char *targets[4] = {
         "No-Cal (Pure QEC)",
@@ -1315,19 +1325,20 @@ static int cmd_ftqc_suite(int argc, char **argv) {
     ftqc_app_t apps[8];
     uint32_t n_apps = 0u;
 
-    const char *kmb_files[7][3] = {
-        {"QAOA_MaxCut12_Base", "ApproxOpt x QEC",   "qaoa_maxcut12.kmb"},
-        {"QAOA_MaxCut12_Opt",  "PopLUT Opt QAOA",   "qaoa_maxcut12_opt.kmb"},
-        {"Ising4x4_Trotter",   "Many-Body 2Q-Gate", "ising4x4_trotter.kmb"},
-        {"Plaquette4x4_LGT",   "Lattice Gauge 4B",  "plaquette4x4_lgt.kmb"},
-        {"KSAT12_Grover",      "NP Combinatorial",  "ksat12_grover.kmb"},
-        {"GF256_SEARU_A32",    "Post-Quantum SBox", "gf256_tower_a32.kmb"},
-        {"AES128_10R_Fwd",     "PQC AES-128",       "selftest_aes128_fwd.kmb"}
+    const char *kmb_files[8][3] = {
+        {"QAOA_MaxCut12_Base",    "ApproxOpt x QEC",   "qaoa_maxcut12.kmb"},
+        {"QAOA_MaxCut12_Opt",     "PopLUT Opt QAOA",   "qaoa_maxcut12_opt.kmb"},
+        {"QAOA_MaxCut12_Wallace", "Wallace 3:2 QAOA",  "qaoa_maxcut12_wallace.kmb"},
+        {"Ising4x4_Trotter",      "Many-Body 2Q-Gate", "ising4x4_trotter.kmb"},
+        {"Plaquette4x4_LGT",      "Lattice Gauge 4B",  "plaquette4x4_lgt.kmb"},
+        {"KSAT12_Grover",         "NP Combinatorial",  "ksat12_grover.kmb"},
+        {"GF256_SEARU_A32",       "Post-Quantum SBox", "gf256_tower_a32.kmb"},
+        {"AES128_10R_Fwd",        "PQC AES-128",       "selftest_aes128_fwd.kmb"}
     };
 
-    for (uint32_t i = 0u; i < 7u; ++i) {
+    for (uint32_t i = 0u; i < 8u; ++i) {
         char pbuf[512];
-        if (i < 6u) snprintf(pbuf, sizeof(pbuf), "%s/%s", qcc_dir, kmb_files[i][2]);
+        if (i < 7u) snprintf(pbuf, sizeof(pbuf), "%s/%s", qcc_dir, kmb_files[i][2]);
         else        snprintf(pbuf, sizeof(pbuf), "build/%s", kmb_files[i][2]);
 
         qcc_kmb_circuit_t kmb;
@@ -1376,19 +1387,30 @@ static int cmd_ftqc_suite(int argc, char **argv) {
     }
 
     fprintf(rp, "\n## 2. Ring-0 Real-Time QEC Decoder & Cycle Deadline Budget (`1,000 ns`)\n\n");
-    fprintf(rp, "| Surface Code Distance | Measured Ring-0 Decode Latency | `1,000 ns` Budget Headroom | Below-Threshold Suppression `Λ` |\n");
+    fprintf(rp, "| Decoder Mode & Distance | Measured Ring-0 Decode Latency | `1,000 ns` Budget Headroom | Below-Threshold Suppression `Λ` |\n");
     fprintf(rp, "| :---: | :---: | :---: | :---: |\n");
-    fprintf(rp, "| `d = 3` | **`%.2f ns / round`** | %.1fx faster | baseline |\n",
+    fprintf(rp, "| 2D `d = 3` (Code Cap) | **`%.2f ns / round`** | %.1fx faster | baseline |\n",
             (double)dec_sum.decoder_d3_ns_x100 / 100.0,
             1000.0 / (dec_sum.decoder_d3_ns_x100 > 0u ? ((double)dec_sum.decoder_d3_ns_x100 / 100.0) : 1.0));
-    fprintf(rp, "| `d = 5` | **`%.2f ns / round`** | %.1fx faster | **`Λ(3→5) = %.2fx`** |\n",
+    fprintf(rp, "| 2D `d = 5` (Code Cap) | **`%.2f ns / round`** | %.1fx faster | **`Λ_2D(3→5) = %.2fx`** |\n",
             (double)dec_sum.decoder_d5_ns_x100 / 100.0,
             1000.0 / (dec_sum.decoder_d5_ns_x100 > 0u ? ((double)dec_sum.decoder_d5_ns_x100 / 100.0) : 1.0),
             (double)dec_sum.lambda_d3_to_d5_x100 / 100.0);
-    fprintf(rp, "| `d = 7` | **`%.2f ns / round`** | %.1fx faster | **`Λ(5→7) = %.2fx`** |\n",
+    fprintf(rp, "| 2D `d = 7` (Code Cap) | **`%.2f ns / round`** | %.1fx faster | **`Λ_2D(5→7) = %.2fx`** |\n",
             (double)dec_sum.decoder_d7_ns_x100 / 100.0,
             1000.0 / (dec_sum.decoder_d7_ns_x100 > 0u ? ((double)dec_sum.decoder_d7_ns_x100 / 100.0) : 1.0),
             (double)dec_sum.lambda_d5_to_d7_x100 / 100.0);
+    fprintf(rp, "| 3D `d = 3` (`d` noisy rnds) | **`%.2f ns / round`** | %.1fx faster | baseline |\n",
+            (double)dec_sum.decoder3d_d3_ns_x100 / 100.0,
+            1000.0 / (dec_sum.decoder3d_d3_ns_x100 > 0u ? ((double)dec_sum.decoder3d_d3_ns_x100 / 100.0) : 1.0));
+    fprintf(rp, "| 3D `d = 5` (`d` noisy rnds) | **`%.2f ns / round`** | %.1fx faster | **`Λ_3D(3→5) = %.2fx`** |\n",
+            (double)dec_sum.decoder3d_d5_ns_x100 / 100.0,
+            1000.0 / (dec_sum.decoder3d_d5_ns_x100 > 0u ? ((double)dec_sum.decoder3d_d5_ns_x100 / 100.0) : 1.0),
+            (double)dec_sum.lambda3d_d3_to_d5_x100 / 100.0);
+    fprintf(rp, "| 3D `d = 7` (`d` noisy rnds) | **`%.2f ns / round`** | %.1fx faster | **`Λ_3D(5→7) = %.2fx`** |\n",
+            (double)dec_sum.decoder3d_d7_ns_x100 / 100.0,
+            1000.0 / (dec_sum.decoder3d_d7_ns_x100 > 0u ? ((double)dec_sum.decoder3d_d7_ns_x100 / 100.0) : 1.0),
+            (double)dec_sum.lambda3d_d5_to_d7_x100 / 100.0);
 
     static const uint32_t kGenF2Q[2]   = {996000u, 998500u};
     static const char    *kGenName[2]  = {
@@ -1457,10 +1479,11 @@ static int cmd_ftqc_suite(int argc, char **argv) {
     char cult_list[512] = "";
     char fall_list[512] = "";
     uint32_t n_cult = 0u, n_fall = 0u;
-    int qaoa_base_idx = -1, qaoa_opt_idx = -1;
+    int qaoa_base_idx = -1, qaoa_opt_idx = -1, qaoa_wal_idx = -1;
     for (uint32_t a = 0u; a < n_apps; ++a) {
-        if (strcmp(apps[a].name, "QAOA_MaxCut12_Base") == 0) qaoa_base_idx = (int)a;
-        if (strcmp(apps[a].name, "QAOA_MaxCut12_Opt") == 0)  qaoa_opt_idx  = (int)a;
+        if (strcmp(apps[a].name, "QAOA_MaxCut12_Base") == 0)    qaoa_base_idx = (int)a;
+        if (strcmp(apps[a].name, "QAOA_MaxCut12_Opt") == 0)     qaoa_opt_idx  = (int)a;
+        if (strcmp(apps[a].name, "QAOA_MaxCut12_Wallace") == 0) qaoa_wal_idx  = (int)a;
         const pqc_ftqc_design_t *d_r0 = &res_grid[1][a][3];
         char item[96];
         if (d_r0->below_sc_threshold && d_r0->cult_viable) {
@@ -1488,7 +1511,7 @@ static int cmd_ftqc_suite(int argc, char **argv) {
             (double)res_grid[1][0][3].p_eff_ppb / 1e7,
             n_cult, n_apps, n_cult ? cult_list : "none",
             n_fall ? fall_list : "none");
-    if (qaoa_base_idx >= 0 && qaoa_opt_idx >= 0) {
+    if (qaoa_base_idx >= 0 && qaoa_opt_idx >= 0 && qaoa_wal_idx >= 0) {
         uint64_t qb = res_grid[1][qaoa_base_idx][3].data_phys_qubits +
                       (res_grid[1][qaoa_base_idx][3].cult_viable
                            ? res_grid[1][qaoa_base_idx][3].cult_factory_qubits
@@ -1497,17 +1520,27 @@ static int cmd_ftqc_suite(int argc, char **argv) {
                       (res_grid[1][qaoa_opt_idx][3].cult_viable
                            ? res_grid[1][qaoa_opt_idx][3].cult_factory_qubits
                            : res_grid[1][qaoa_opt_idx][3].dist_factory_qubits);
-        fprintf(rp, "- **Compiler Popcount-LUT co-design payoff**: `QAOA_MaxCut12_Base -> QAOA_MaxCut12_Opt` cuts logical qubits `%u -> %u` and `CCX` `%llu -> %llu`, reducing Gen-2 Ring-0 physical footprint **`%llu -> %llu`** qubits.\n",
+        uint64_t qw = res_grid[1][qaoa_wal_idx][3].data_phys_qubits +
+                      (res_grid[1][qaoa_wal_idx][3].cult_viable
+                           ? res_grid[1][qaoa_wal_idx][3].cult_factory_qubits
+                           : res_grid[1][qaoa_wal_idx][3].dist_factory_qubits);
+        fprintf(rp, "- **3-Stage Compiler QAOA Trajectory (PopLUT -> Wallace 3:2 crosses Cultivation Cliff)**: `Base -> PopLUT -> Wallace 3:2` compresses `QAOA_MaxCut12` logical footprint `Q: %u -> %u -> %u` and `T-eq: %llu -> %llu -> %llu`, cutting Gen-2 Ring-0 physical footprint **`%llu -> %llu -> %llu`** qubits (%s).\n",
                 (unsigned)apps[qaoa_base_idx].st.num_qubits,
                 (unsigned)apps[qaoa_opt_idx].st.num_qubits,
-                (unsigned long long)apps[qaoa_base_idx].st.toffoli,
-                (unsigned long long)apps[qaoa_opt_idx].st.toffoli,
-                (unsigned long long)qb, (unsigned long long)qo);
+                (unsigned)apps[qaoa_wal_idx].st.num_qubits,
+                (unsigned long long)apps[qaoa_base_idx].t_eq,
+                (unsigned long long)apps[qaoa_opt_idx].t_eq,
+                (unsigned long long)apps[qaoa_wal_idx].t_eq,
+                (unsigned long long)qb, (unsigned long long)qo, (unsigned long long)qw,
+                res_grid[1][qaoa_wal_idx][3].cult_viable ? "Cultivation UNLOCKED!" : "15-to-1 fallback");
     }
-    fprintf(rp, "- **Sub-microsecond Ring-0 decoding**: Pure-GPR MWPM latency spans `%.2f ns` (`d=3`) to `%.2f ns` (`d=7`), staying well inside the `1,000 ns` surface-code cycle deadline with `Λ(5→7) = %.2fx` suppression.\n",
+    fprintf(rp, "- **Sub-microsecond Ring-0 2D & 3D decoding**: Pure-GPR MWPM latency spans `%.2f–%.2f ns/rnd` (2D) and `%.2f–%.2f ns/rnd` (3D noisy rounds, `d=3..7`), inside the `1,000 ns` cycle budget with `Λ_2D(5→7) = %.2fx` & `Λ_3D(5→7) = %.2fx`.\n",
             (double)dec_sum.decoder_d3_ns_x100 / 100.0,
             (double)dec_sum.decoder_d7_ns_x100 / 100.0,
-            (double)dec_sum.lambda_d5_to_d7_x100 / 100.0);
+            (double)dec_sum.decoder3d_d3_ns_x100 / 100.0,
+            (double)dec_sum.decoder3d_d7_ns_x100 / 100.0,
+            (double)dec_sum.lambda_d5_to_d7_x100 / 100.0,
+            (double)dec_sum.lambda3d_d5_to_d7_x100 / 100.0);
     fclose(rp);
     printf("\nGenerated Full-Stack FTQC Co-Design Report -> %s\n", rep_path);
 

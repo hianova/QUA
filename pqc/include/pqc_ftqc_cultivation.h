@@ -49,6 +49,11 @@ typedef struct {
     uint32_t decoder_d7_ns_x100;
     uint32_t lambda_d3_to_d5_x100;
     uint32_t lambda_d5_to_d7_x100;
+    uint32_t decoder3d_d3_ns_x100;
+    uint32_t decoder3d_d5_ns_x100;
+    uint32_t decoder3d_d7_ns_x100;
+    uint32_t lambda3d_d3_to_d5_x100;
+    uint32_t lambda3d_d5_to_d7_x100;
 } pqc_decoder_summary_t;
 
 /* Pure integer computation of p_eff in ppb (1 = 10^-9) */
