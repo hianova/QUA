@@ -12,7 +12,7 @@ on:
 
 jobs:
   verify-qua:
-    name: QCC + PQC + Lean-FIR Verification (${{ matrix.os }})
+    name: QCC + PQC + Lean-FIR + Lean-QECC Verification (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -58,3 +58,4 @@ jobs:
           make -C FLOW all CC=clang CXX=clang++
           make -C QUA qcc qctrl pqc ftqc LEAN=false CC=clang CXX=clang++
           make -C QUA/qcc FLOW_DIR="$(pwd)/FLOW" lean-fir CC=clang CXX=clang++
+          make -C QUA lean-qecc

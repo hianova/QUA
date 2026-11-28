@@ -15,7 +15,11 @@
 - [`pqc/`](pqc/README.md)：**PQC / NIST 安全基準與全端 FTQC 共設計引擎**
   - [`include/pqc_oracles.h`](pqc/include/pqc_oracles.h) / [`include/pqc_nist_est.h`](pqc/include/pqc_nist_est.h)：AES-128/192/256、SHA-256、Ascon、Keccak-f[400]、Classic McEliece、ML-KEM、MQ Oracle 與純整數 `Q16.16` `MAXDEPTH` 資源估算。
   - [`include/pqc_ftqc_cultivation.h`](pqc/include/pqc_ftqc_cultivation.h)：整合 `qctrl` 實測物理誤差＋實時解碼延遲＋表面碼距與 **Magic State Cultivation vs 15-to-1 Distillation** 時空體積評估（純整數運算，零 `<math.h>`），透過 `pqc ftqc-suite` 對 8 大基準電路產出動態結論完全一致的 [`FTQC_CODESIGN_REPORT.md`](FTQC_CODESIGN_REPORT.md) 與 JSON（Gen-2 解鎖 **5/8** 基準）。
-- [`ir/`](ir) & [`Qua.lean`](Qua.lean)：`FLOW v10.0.0` 雙軌規格（8 份 `.fasm` + SEARU synthesis + Z3 `QF_BV` equivalence 與 `Qua.lean` bit-exact 核對）。
+- [`ir/`](ir) & [`Qua.lean`](Qua.lean)：`FLOW v10.0.0` 雙軌規格（8 份 `.fasm` + SEARU synthesis + Z3 `QF_BV` equivalence 與 `Qua.lean` bit-exact 核對，維持 0 定理純組態不變量）。
+- [`Qua/QeccCliffordT.lean`](Qua/QeccCliffordT.lean)：**Pure-Init Lean 4.36.0 QECC 穩定子 / CWS 與精確環 $\mathbb{Z}[\zeta_8, 1/2]$ Clifford+T 形式化證明模組**（零 Mathlib、`0 sorry`、`0 axiom`、`0 native_decide`、`0 set_option`；通過 `leanchecker` 與批次 `#print axioms` 稽核）：
+  - **穩定子中心化子精確碼距**：`[[5,1,3]]`、`[[7,1,3]]`、`[[8,3,3]]`、`[[9,1,3]]`、`[[10,2,3]]`、`[[10,2,4]]`、`[[11,1,5]]`、Dodeca `[[12,0,6]]`（成對對易、滿 `F_2` 秩、中心化子窮舉 / 權重下界與邏輯算符見證）。
+  - **超越穩定子界的非加性 CWS 碼**：`((5,6,2))`、`((9,12,3))`、`((10,24,3))` 全體 weight-1 / weight-2 偵錯健全性定理。
+  - **精確 $\mathbb{Z}[\zeta_8, 1/2]$ Clifford+T 證明**：`CS` 3-T 恆等與 `T ≤ 2` 跨 241 組 Pauli 旋轉窮舉不可行性（`cs_minT_gt_2_exhaustive`）、`CCZ` / `Toffoli` / `Fredkin` 7-T 與 `RTOF` 4-T 精確矩陣恆等及么正性、以及普遍代數相位多項式下界（`ccz_phase_poly_min7`）。
 - [`ARCHITECTURE_DISCOVERY_REPORT.md`](ARCHITECTURE_DISCOVERY_REPORT.md) & [`FTQC_CODESIGN_REPORT.md`](FTQC_CODESIGN_REPORT.md)：跨層相變分析、經濟斷崖線（$T_{\text{eq}} \lesssim 250\text{–}300$）、與全端資源實測戰報。
 - [`kaggle/`](kaggle/README.md)：Google Quantum AI — Verifiable Quantum Circuit Compilation 本地工作區。
 
@@ -28,11 +32,12 @@ make qcc LEAN=false   # 免 Lean 預設建置：.fasm -> SEARU synth -> Z3 equiv
 make qctrl            # Ring-0 Pure-GPR 稽核 + 純 C17 512 維 Break-Even 戰報
 make pqc ftqc         # PQC KAT/雙種子測試 + 全端 Cultivation 共設計報告 (FTQC_CODESIGN_REPORT.md)
 make -C qcc lean-fir  # 驗證 Qua.lean 與 .fasm 位元組完全一致 + 跨 ELE 同源檢驗
-make clean            # 清除 qcc / pqc / qctrl / kaggle 編譯產物
+make lean-qecc        # 編譯 Qua/QeccCliffordT.lean (-DwarningAsError=true) + leanchecker + 零 sorry/axiom 批次稽核
+make clean            # 清除 qcc / pqc / qctrl / kaggle / build 編譯產物
 ```
 
 ---
 
 ## CI 驗證範圍
 
-- GitHub Actions CI（`ubuntu-latest` + `macos-latest`）同時驗證 **Zero-Lean 預設管線（`LEAN=false`）**：`qcc`（`T1`–`T23` + `.fasm` + Z3 miter）、`qctrl`（Ring-0 稽核 + `selftest` + `breakeven`）、`pqc` + `ftqc` 閉環報告，以及選配 `lean-fir` 與 `Qua.lean` 等價校驗。
+- GitHub Actions CI（`ubuntu-latest` + `macos-latest`）同時驗證 **Zero-Lean 預設管線（`LEAN=false`）**：`qcc`（`T1`–`T23` + `.fasm` + Z3 miter）、`qctrl`（Ring-0 稽核 + `selftest` + `breakeven`）、`pqc` + `ftqc` 閉環報告，以及 `lean-fir`（`Qua.lean` 等價校驗）與 `lean-qecc`（`Qua/QeccCliffordT.lean` + `leanchecker`）。
