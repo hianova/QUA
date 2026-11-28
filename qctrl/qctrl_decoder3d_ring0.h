@@ -28,6 +28,7 @@ extern "C" {
 #define QCTRL_DEC3D_MATE_BND   0xFFU
 
 #define QCTRL_BLOS_MAX_N       48U
+#define QCTRL_BLOS3D_MAX_K     QCTRL_BLOS_MAX_N
 #define QCTRL_BLOS_MAX_V       74U
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -565,9 +566,16 @@ FLOW_INL bool qctrl__blos_matching_step(qctrl_blos3d_ws_t *ws) {
 QCTRL_DEC3D_NOINL uint64_t qctrl__solve_comp_blossom3d_ring0(const qctrl_sc_code_t *code, uint32_t g,
                                                              const uint8_t *cs, const uint8_t *ct,
                                                              uint32_t k, uint32_t *out_cost) {
+    if (!code || !cs || !ct || k == 0U || k > QCTRL_BLOS3D_MAX_K) {
+        if (out_cost != NULL) {
+            *out_cost = 0U;
+        }
+        return 0ULL;
+    }
+
     qctrl_blos3d_ws_t ws;
     uint32_t i, j;
-    uint8_t w_max = 0U;
+    uint8_t w_max  = 0U;
 
     ws.n         = k;
     ws.n_x       = k;
@@ -575,7 +583,7 @@ QCTRL_DEC3D_NOINL uint64_t qctrl__solve_comp_blossom3d_ring0(const qctrl_sc_code
     ws.qh        = 0U;
     ws.qt        = 0U;
 
-    for (i = 0U; i <= k; ++i) {
+    for (i = 0U; i < (QCTRL_BLOS_MAX_N + 1U); ++i) {
         ws.lab[i]   = 0;
         ws.match[i] = 0U;
         ws.slack[i] = 0U;
@@ -584,12 +592,12 @@ QCTRL_DEC3D_NOINL uint64_t qctrl__solve_comp_blossom3d_ring0(const qctrl_sc_code
         ws.S[i]     = -1;
         ws.vis[i]   = 0U;
         ws.flen[i]  = 0U;
-        for (j = 0U; j <= k; ++j) {
+        for (j = 0U; j < (QCTRL_BLOS_MAX_N + 1U); ++j) {
             ws.g_u[i][j] = (uint8_t)i;
             ws.g_v[i][j] = (uint8_t)j;
             ws.g_w[i][j] = 0U;
         }
-        for (j = 0U; j <= k; ++j) {
+        for (j = 0U; j < (QCTRL_BLOS_MAX_N + 1U); ++j) {
             ws.flower_from[i][j] = (i > 0U && i == j) ? (uint8_t)i : 0U;
         }
     }
@@ -625,8 +633,10 @@ QCTRL_DEC3D_NOINL uint64_t qctrl__solve_comp_blossom3d_ring0(const qctrl_sc_code
         return corr0;
     }
 
-    for (i = 1U; i <= k; ++i) {
-        ws.lab[i] = (int32_t)w_max;
+    for (i = 1U; i <= QCTRL_BLOS_MAX_N; ++i) {
+        if (i <= k) {
+            ws.lab[i] = (int32_t)w_max;
+        }
     }
 
     while (qctrl__blos_matching_step(&ws)) {

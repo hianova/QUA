@@ -5,7 +5,7 @@ LEAN        ?= false
 LEAN_BIN    ?= lean
 LEANCHECKER ?= leanchecker
 
-.PHONY: all qcc pqc qctrl kaggle ftqc test lean-qecc clean
+.PHONY: all qcc pqc qctrl kaggle ftqc test lean-qecc oracle clean
 
 all: qcc pqc qctrl
 	$(MAKE) -C kaggle FLOW_DIR=$(abspath $(FLOW_DIR)) build-synth build-bootstrap
@@ -37,6 +37,9 @@ lean-qecc:
 	$(LEAN_BIN) -DwarningAsError=true -R . -o build/lean/Qua/QeccCliffordT.olean Qua/QeccCliffordT.lean
 	LEAN_PATH=build/lean $(LEANCHECKER) Qua.QeccCliffordT
 	@python3 -c 'import re,subprocess,os; src=open("Qua/QeccCliffordT.lean",encoding="utf-8").read(); thms=re.findall(r"^(?:theorem|lemma)\s+([A-Za-z0-9_]+)", src, re.M); assert thms, "no public theorems found"; chk="build/lean/_check_qecc_axioms.lean"; open(chk,"w").write("import Qua.QeccCliffordT\n" + "\n".join(f"#print axioms Qua.QeccCliffordT.{t}" for t in thms) + "\n"); env=dict(os.environ, LEAN_PATH="build/lean"); r=subprocess.run(["$(LEAN_BIN)", "-DwarningAsError=true", chk], env=env, capture_output=True, text=True); os.remove(chk); print(r.stdout.strip()); assert r.returncode==0, r.stderr; assert "sorryAx" not in r.stdout and "sorryAx" not in r.stderr, "sorryAx detected"; print(f"  [PASS] Qua.QeccCliffordT: {len(thms)} public theorems verified (leanchecker + #print axioms 0 sorryAx)")'
+
+oracle:
+	FLOW_DIR=$(abspath $(FLOW_DIR)) python3 oracles/verify_qua_oracle.py
 
 clean:
 	$(MAKE) -C qcc clean

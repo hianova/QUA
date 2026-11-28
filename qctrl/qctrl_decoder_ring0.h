@@ -299,18 +299,25 @@ FLOW_INL bool qctrl_sc_init_ring0(qctrl_sc_code_t *code, uint32_t d) {
     if (!code || (d != 3U && d != 5U && d != 7U)) {
         return false;
     }
-    code->d          = d;
-    code->n_data     = d * d;
-    code->n_stab     = (code->n_data - 1U) >> 1U;
-    code->log_x_mask = 0ULL;
-    code->log_z_mask = 0ULL;
+    uint32_t n_data   = (d == 3U) ? 9U : ((d == 5U) ? 25U : 49U);
+    uint32_t n_stab   = (d == 3U) ? 4U : ((d == 5U) ? 12U : 24U);
+    uint32_t d_m1     = (d == 3U) ? 2U : ((d == 5U) ? 4U : 6U);
+    uint64_t d64      = (d == 3U) ? 3ULL : ((d == 5U) ? 5ULL : 7ULL);
+    uint64_t last_row = (d == 3U) ? 6ULL : ((d == 5U) ? 20ULL : 42ULL);
+    code->d           = d;
+    code->n_data      = n_data;
+    code->n_stab      = n_stab;
+    code->log_x_mask  = 0ULL;
+    code->log_z_mask  = 0ULL;
     for (i = 0U; i < QCTRL_DEC_MAX_STAB; ++i) {
         code->z_stab_mask[i] = 0ULL;
         code->x_stab_mask[i] = 0ULL;
     }
 
+    uint64_t row_off = 0ULL;
     for (r = 0U; r < d; ++r) {
-        code->log_x_mask |= (UINT64_C(1) << (r * d));
+        code->log_x_mask |= (UINT64_C(1) << row_off);
+        row_off += d64;
     }
     for (c = 0U; c < d; ++c) {
         code->log_z_mask |= (UINT64_C(1) << c);
@@ -318,51 +325,59 @@ FLOW_INL bool qctrl_sc_init_ring0(qctrl_sc_code_t *code, uint32_t d) {
 
     /* Rotated surface code Z-stabilizers (detect X) */
     uint32_t nz = 0U;
-    for (r = 0U; r + 1U < d; ++r) {
-        for (c = 0U; c + 1U < d; ++c) {
+    for (r = 0U; r < d_m1; ++r) {
+        uint64_t r0 = (uint64_t)r * d64;
+        uint64_t r1 = r0 + d64;
+        for (c = 0U; c < d_m1; ++c) {
             if (((r + c) & 1U) == 0U && nz < code->n_stab) {
-                uint64_t m = (UINT64_C(1) << (r * d + c)) |
-                             (UINT64_C(1) << (r * d + (c + 1U))) |
-                             (UINT64_C(1) << ((r + 1U) * d + c)) |
-                             (UINT64_C(1) << ((r + 1U) * d + (c + 1U)));
+                uint64_t m = (UINT64_C(1) << (r0 + (uint64_t)c)) |
+                             (UINT64_C(1) << (r0 + (uint64_t)c + 1ULL)) |
+                             (UINT64_C(1) << (r1 + (uint64_t)c)) |
+                             (UINT64_C(1) << (r1 + (uint64_t)c + 1ULL));
                 code->z_stab_mask[nz++] = m;
             }
         }
     }
-    for (r = 1U; r + 1U < d; r += 2U) {
+    for (r = 1U; r < d_m1; r += 2U) {
         if (nz < code->n_stab) {
-            code->z_stab_mask[nz++] = (UINT64_C(1) << (r * d)) | (UINT64_C(1) << ((r + 1U) * d));
+            uint64_t r0 = (uint64_t)r * d64;
+            code->z_stab_mask[nz++] = (UINT64_C(1) << r0) | (UINT64_C(1) << (r0 + d64));
         }
     }
-    for (r = 0U; r + 1U < d; r += 2U) {
+    for (r = 0U; r < d_m1; r += 2U) {
         if (nz < code->n_stab) {
+            uint64_t r0 = (uint64_t)r * d64;
             code->z_stab_mask[nz++] =
-                (UINT64_C(1) << (r * d + (d - 1U))) | (UINT64_C(1) << ((r + 1U) * d + (d - 1U)));
+                (UINT64_C(1) << (r0 + (uint64_t)d_m1)) |
+                (UINT64_C(1) << (r0 + d64 + (uint64_t)d_m1));
         }
     }
 
     /* Rotated surface code X-stabilizers (detect Z) */
     uint32_t nx = 0U;
-    for (r = 0U; r + 1U < d; ++r) {
-        for (c = 0U; c + 1U < d; ++c) {
+    for (r = 0U; r < d_m1; ++r) {
+        uint64_t r0 = (uint64_t)r * d64;
+        uint64_t r1 = r0 + d64;
+        for (c = 0U; c < d_m1; ++c) {
             if (((r + c) & 1U) == 1U && nx < code->n_stab) {
-                uint64_t m = (UINT64_C(1) << (r * d + c)) |
-                             (UINT64_C(1) << (r * d + (c + 1U))) |
-                             (UINT64_C(1) << ((r + 1U) * d + c)) |
-                             (UINT64_C(1) << ((r + 1U) * d + (c + 1U)));
+                uint64_t m = (UINT64_C(1) << (r0 + (uint64_t)c)) |
+                             (UINT64_C(1) << (r0 + (uint64_t)c + 1ULL)) |
+                             (UINT64_C(1) << (r1 + (uint64_t)c)) |
+                             (UINT64_C(1) << (r1 + (uint64_t)c + 1ULL));
                 code->x_stab_mask[nx++] = m;
             }
         }
     }
-    for (c = 0U; c + 1U < d; c += 2U) {
+    for (c = 0U; c < d_m1; c += 2U) {
         if (nx < code->n_stab) {
             code->x_stab_mask[nx++] = (UINT64_C(1) << c) | (UINT64_C(1) << (c + 1U));
         }
     }
-    for (c = 1U; c + 1U < d; c += 2U) {
+    for (c = 1U; c < d_m1; c += 2U) {
         if (nx < code->n_stab) {
             code->x_stab_mask[nx++] =
-                (UINT64_C(1) << ((d - 1U) * d + c)) | (UINT64_C(1) << ((d - 1U) * d + c + 1U));
+                (UINT64_C(1) << (last_row + (uint64_t)c)) |
+                (UINT64_C(1) << (last_row + (uint64_t)c + 1ULL));
         }
     }
     if (nz != code->n_stab || nx != code->n_stab) {
